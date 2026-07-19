@@ -147,7 +147,7 @@ LogVerbose()
     
         if [ -z "${show_logs}" ]
         then
-            echo "$@"
+            >&2 echo "$@"
         fi
     fi
 }
@@ -1604,9 +1604,9 @@ Store_Identity_Service_Settings()
 
     if [ -n "$ok" ]
     then
-        request_body="{ \"id\": 0, \"name\": \"${service}\", \"objectType\": \"${service_type}\", \"configurationType\": \"IAM\", \"configurationItem\": $(echo "{ \"$(echo ${service_type} | tr '[:upper:]' '[:lower:]')\": ${settings} }" | jq -c | jq -RM) }"
+        request_body="{ \"id\": 0, \"name\": \"${service}\", \"objectType\": \"${service_type}\", \"configurationType\": \"IAM\", \"configurationItem\": $(echo "{ \"$(echo ${service_type} | cut -d'-' -f1 | tr '[:upper:]' '[:lower:]')\": ${settings} }" | jq -c | jq -RM)"
     else
-        request_body="{ \"id\": 0, \"name\": \"${service}\", \"objectType\": \"${service_type}\", \"configurationType\": \"IAM\", \"configurationItem\": $(echo "${settings}" | jq -c | jq -RM) }"
+        request_body="{ \"id\": 0, \"name\": \"${service}\", \"objectType\": \"${service_type}\", \"configurationType\": \"IAM\", \"configurationItem\": $(echo "${settings}" | jq -c | jq -RM)"
     fi
 
     Audit_Log_Request
@@ -1878,10 +1878,10 @@ Arguments()
             exit 1
         fi
     
-        if [ -z "${joc_user}" ]
+        if [ -z "${joc_user}" ] && [ -z "${joc_client_key}" ]
         then
             Usage 2
-            LogError "JOC Cockpit user account not specified: --user=<account>"
+            LogError "No JOC Cockpit client authentication certificate and no user account specified: --user=<account>"
             exit 1
         fi
     

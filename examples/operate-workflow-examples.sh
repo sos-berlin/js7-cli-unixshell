@@ -11,16 +11,50 @@ request_options=(--url=http://joc-2-0-primary.sos:7446 --user=root --password=ro
 # add ad hoc order
 ./operate-workflow.sh add-order "${request_options[@]}" --date-to=now --workflow=ap3jobs --order-name=sample-1 --start-position=job2 --end-position=job3
 
+# add timed order for the next day in specific time zone
+./operate-workflow.sh add-order "${request_options[@]}" \
+    --workflow=ap3Jobs --date-to="$(TZ=Asia/Tokyo date --date='+1 day' +'%Y-%m-%d %H:%M:%S')" --time-zone=Asia/Tokyo
+
+# add timed order for a point in time in 3 minutes, time zone must be Etc/UTC
+./operate-workflow.sh add-order "${request_options[@]}" \
+    --workflow=ap3Jobs --date-to="now+180" --time-zone=Etc/UTC
+
 # add pending order
 ./operate-workflow.sh add-order "${request_options[@]}" --date-to=never --workflow=ap3jobs --order-name=sample-1 --start-position=job2 --end-position=job3
 
 # add scheduled order and force admission
 ./operate-workflow.sh add-order "${request_options[@]}" --date-to=now+15 --workflow=ap3jobs --order-name=sample-1 --start-position=job2 --end-position=job3 --force
 
+# add ad hoc order with variables
+./operate-workflow.sh add-order "${request_options[@]}" --date-to=now --workflow=ap3jobs --variable="var1=new string,var2=24,var3=true"
+
+
 # add ad hoc order and feed audit log
 ./operate-workflow.sh add-order "${request_options[@]}" --workflow=ap3jobs \
     --audit-message="order added by operate-workflow.sh" --audit-time-spent=1 \
     --audit-link="https://www.sos-berlin.com"
+
+
+# get order by ID
+./operate-workflow.sh get-order "${request_options[@]}" --order-id="#2025-04-09#T22240566772-root"
+
+# get orders by workflows
+./operate-workflow.sh get-order "${request_options[@]}" --workflow=ap3jobs,apEnv
+
+# get orders by workflows and process result
+./operate-workflow.sh get-order "${request_options[@]}" --workflow=ap3jobs,apEnv | jq -r '.orders[] | .orderId'
+
+# get orders by folder and reeturn order id
+orders=$(./operate-workflow.sh get-order "${request_options[@]}" --folder=/ap,/ProductDemo | jq -r '.orders[] | .orderId')
+
+# get orders by state and return order id
+./operate-workflow.sh get-order "${request_options[@]}" --state=RUNNING,SCHEDULED | jq -r '.orders[] | .orderId'
+
+# get orders, limit result set size and return order id
+./operate-workflow.sh get-order "${request_options[@]}" --folder=/ap,/ProductDemo --limit=3 | jq -r '.orders[] | .orderId'
+
+# get orders by regular expression and return order id
+./operate-workflow.sh get-order "${request_options[@]}" --folder=/ap,/ProductDemo --regex=Variables | jq -r '.orders[] | .orderId'
 
 
 # cancel order by state

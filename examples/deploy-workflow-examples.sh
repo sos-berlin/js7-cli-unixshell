@@ -20,6 +20,18 @@ request_options=(--url=http://joc-2-0-primary.sos:7446 --user=root --password=ro
 # export objects from folder, limiting object type and validity, feeding audit log
 ./deploy-workflow.sh export "${request_options[@]}" --file=export.zip --folder=/ap --recursive --type=WORKFLOW,NOTICEBOARD --no-invalid --audit-message="export to prod"
 
+# export objects from change including referencing and referenced objects
+./deploy-workflow.sh export "${request_options[@]}" --file=export.zip --change=CH-TestRepo-01
+
+# export objects from change including referencing and referenced objects limited to folder
+./deploy-workflow.sh export "${request_options[@]}" --file=export.zip --change=CH-TestRepo-01 --folder=/TestRepo
+
+# export objects from change including referenced objects
+./deploy-workflow.sh export "${request_options[@]}" --file=export.zip --change=CH-TestRepo-01 --no-referencing
+
+# export objects from change including referencing objects
+./deploy-workflow.sh export "${request_options[@]}" --file=export.zip --change=CH-TestRepo-01 --no-references
+
 
 # import objects
 ./deploy-workflow.sh import "${request_options[@]}" --file=export.zip --overwrite
@@ -41,16 +53,26 @@ request_options=(--url=https://centostest-primary.sos:6446 --user=ap-si-ecdsa --
 # ------------------------------ Deploy/Revoke ----------
 
 # deploy objects from folder
-./deploy-workflow.sh deploy  "${request_options[@]}" --folder=/ap/Agent --recursive --date-from=now
+./deploy-workflow.sh deploy "${request_options[@]}" --folder=/ap/Agent --recursive --date-from=now
 
-# deploy workflows
-./deploy-workflow.sh deploy  "${request_options[@]}" --path=/ap/ap3jobs,/ap/apEnv --type=WORKFLOW --date-from=now
+# deploy workflows by object path and type
+./deploy-workflow.sh deploy "${request_options[@]}" --path=/ap/ap3jobs,/ap/apEnv --type=WORKFLOW --date-from=now
+
+# deploy objects by change including referencing objects and referenced objects
+./deploy-workflow.sh deploy "${request_options[@]}" --change=CH-TestRepo-01
+
+# deploy objects by change excluding referencing objects
+./deploy-workflow.sh deploy "${request_options[@]}" --change=CH-TestRepo-01 --no-referencing
+
+# deploy objects by change excluding referenced objects
+./deploy-workflow.sh deploy "${request_options[@]}" --change=CH-TestRepo-01 --no-references
+
 
 # revoke objects from folder
-./deploy-workflow.sh revoke  "${request_options[@]}" --folder=/ap/Agent --recursive 
+./deploy-workflow.sh revoke "${request_options[@]}" --folder=/ap/Agent --recursive 
 
 # revoke workflows
-./deploy-workflow.sh revoke  "${request_options[@]}" --path=/ap/ap3jobs,/ap/apEnv --type=WORKFLOW
+./deploy-workflow.sh revoke "${request_options[@]}" --path=/ap/ap3jobs,/ap/apEnv --type=WORKFLOW
 
 # ------------------------------ Release/Recall ----------
 
@@ -59,6 +81,16 @@ request_options=(--url=https://centostest-primary.sos:6446 --user=ap-si-ecdsa --
 
 # release schedules
 ./deploy-workflow.sh release "${request_options[@]}" --path=/ap/Agent/apAgentSchedule01,/ap/Agent/apAgentSchedule02 --type=SCHEDULE --date-from=now
+
+# release objects by change including referencing objects and referenced objects
+./deploy-workflow.sh release "${request_options[@]}" --folder=/TestRepo --change=CH-TestRepo-01
+
+# release objects by change excluding referencing objects
+./deploy-workflow.sh release "${request_options[@]}" --folder=/TestRepo --change=CH-TestRepo-01 --no-referencing
+
+# release objects by change excluding referenced objects
+./deploy-workflow.sh release "${request_options[@]}" --folder=/TestRepo --change=CH-TestRepo-01 --no-references
+
 
 # recall objects from folder
 ./deploy-workflow.sh recall  "${request_options[@]}" --folder=/ap/Agent --recursive 

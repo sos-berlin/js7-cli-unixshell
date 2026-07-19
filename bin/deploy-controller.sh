@@ -199,7 +199,7 @@ LogVerbose()
     
         if [ -z "${show_logs}" ]
         then
-            echo "$@"
+            >&2 echo "$@"
         fi
     fi
 }
@@ -1490,10 +1490,10 @@ Arguments()
             exit 1
         fi
     
-        if [ -z "${joc_user}" ]
+        if [ -z "${joc_user}" ] && [ -z "${joc_client_key}" ]
         then
             Usage 2
-            LogError "JOC Cockpit user account not specified: --user=<account>"
+            LogError "No JOC Cockpit client authentication certificate and no user account specified: --user=<account>"
             exit 1
         fi
     

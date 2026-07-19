@@ -46,10 +46,12 @@ log_dir=
 log_dir=
 verbose=0
 action=
+jq_options=-cM
 
 item=
 start_time=$(date +"%Y-%m-%dT%H-%M-%S")
 response_json=
+changes_json=
 access_token=
 
 date_from=
@@ -64,15 +66,18 @@ no_invalid=false
 use_short_path=false
 object_path=
 new_object_path=
-deployable_object_type=WORKFLOW,FILEORDERSOURCE,JOBRESOURCE,NOTICEBOARD,LOCK
-releasable_object_type=INCLUDESCRIPT,SCHEDULE,WORKINGDAYSCALENDAR,NONWORKINGDAYSCALENDAR,JOBTEMPLATE,REPORT
-object_types="${deployable_object_type}","${releasable_object_type}"
+deployable_object_types=WORKFLOW,FILEORDERSOURCE,JOBRESOURCE,NOTICEBOARD,LOCK
+releasable_object_types=INCLUDESCRIPT,SCHEDULE,WORKINGDAYSCALENDAR,NONWORKINGDAYSCALENDAR,JOBTEMPLATE
 file=
 format=ZIP
 overwrite=false
 prefix=
 suffix=
 signature_algorithm=SHA512withECDSA
+change=
+no_referencing=0
+no_references=0
+version=
 
 directory=.
 keystore_file=
@@ -148,7 +153,7 @@ LogVerbose()
     
         if [ -z "${show_logs}" ]
         then
-            echo "$@"
+            >&2 echo "$@"
         fi
     fi
 }
@@ -279,8 +284,175 @@ Logout()
     fi
 }
 
+Compatiblity_Settings()
+{
+    LogVerbose ".. Compatiblity_Settings()"
+    Curl_Options
+
+    LogVerbose ".... request:"
+    LogVerbose "curl ${curl_log_options[*]} -H \"X-Access-Token: ${access_token}\" -H \"Accept: application/json\" -H \"Content-Type: application/json\" ${joc_url}/joc/api/joc/version"
+    response_json=$(curl "${curl_options[@]}" -H "X-Access-Token: ${access_token}" -H "Accept: application/json" -H "Content-Type: application/json" "${joc_url}"/joc/api/joc/version)    
+    LogVerbose ".... response:"
+    LogVerbose "${response_json}"
+
+    if echo "${response_json}" | jq -e . >/dev/null 2>&1
+    then
+        version=$(echo "${response_json}" | jq -r '.version // empty' | sed 's/^"//' | sed 's/"$//')
+        if [ -z "${version}" ]
+        then
+            error_code=$(echo "${response_json}" | jq -r '.error.code // empty' | sed 's/^"//' | sed 's/"$//')
+            if [ "${error_code}" = "JOC-400" ]
+            then
+                LogWarning "Compatiblity_Settings() could not perform operation: ${response_json}"
+                exit 3
+            else
+                LogError "Compatiblity_Settings() failed: ${response_json}"
+                exit 4
+            fi
+        fi
+    else
+        LogError "Compatiblity_Settings() failed: ${response_json}"
+        exit 4
+    fi
+
+    if [ "2.7.1" = "$(printf "%s\n%s" "2.7.1" "${version}" | sort -t '.' -k 1,1 -k 2,2 -k 3,3 | head -1)" ]
+    then
+        releasable_object_types=${releasable_object_types},REPORT
+    fi
+}
+
+Get_Changes()
+{
+    LogVerbose ".. Get_Changes()"
+    Curl_Options
+
+    request_body="{ \"names\": ["
+    comma=
+    set -- "$(echo "${change}" | sed -r 's/[,]+/ /g')"
+    for i in $@; do
+        request_body="${request_body}${comma} \"${i}\""
+        comma=,
+    done
+
+    request_body="${request_body} ], \"details\": true }"
+
+    LogVerbose "curl ${curl_log_options[*]} -H \"X-Access-Token: ${access_token}\" -H \"Accept: application/json\" -H \"Content-Type: application/json\" -d ${request_body} ${joc_url}/joc/api/inventory/changes"
+    response_json=$(curl "${curl_options[@]}" -H "X-Access-Token: ${access_token}" -H "Accept: application/json" -H "Content-Type: application/json" -d "${request_body}" "${joc_url}"/joc/api/inventory/changes)
+    LogVerbose ".... response:"
+    LogVerbose "${response_json}"
+
+    if echo "${response_json}" | jq -e . >/dev/null 2>&1
+    then
+        ok=$(echo "${response_json}" | jq -r '.changes[] // empty' | sed 's/^"//' | sed 's/"$//')
+        if [ -z "${ok}" ]
+        then
+            error_code=$(echo "${response_json}" | jq -r '.error.code // empty' | sed 's/^"//' | sed 's/"$//')
+            if [ "${error_code}" = "JOC-400" ]
+            then
+                LogWarning "Get_Changes() could not find objects: ${response_json}"
+                exit 3
+            else
+                LogError "Get_Changes() failed: ${response_json}"
+                exit 4
+            fi
+        fi
+    else
+        LogError "Get_Changes() failed: ${response_json}"
+        exit 4
+    fi
+
+    echo "${response_json}" | jq -r '.'
+}
+
+Get_Change_Dependencies()
+{
+    LogVerbose ".. Get_Dependencies()"
+    Curl_Options
+
+    request_body=$(echo "${changes_json}" | jq -c '{operationType: "EXPORT", configurations: [(.changes[].configurations[] | {name: .name, type: .objectType} )]}')
+        
+    LogVerbose "curl ${curl_log_options[*]} -H \"X-Access-Token: ${access_token}\" -H \"Accept: application/json\" -H \"Content-Type: application/json\" -d ${request_body} ${joc_url}/joc/api/inventory/dependencies"
+    response_json=$(curl "${curl_options[@]}" -H "X-Access-Token: ${access_token}" -H "Accept: application/json" -H "Content-Type: application/json" -d "${request_body}" "${joc_url}"/joc/api/inventory/dependencies)
+LogVerbose ".... response:"
+LogVerbose "${response_json}"
+
+    if echo "${response_json}" | jq -e . >/dev/null 2>&1
+    then
+        ok=$(echo "${response_json}" | jq -r '.requestedItems // empty' | sed 's/^"//' | sed 's/"$//')
+        if [ -z "${ok}" ]
+        then
+            error_code=$(echo "${response_json}" | jq -r '.error.code // empty' | sed 's/^"//' | sed 's/"$//')
+            if [ "${error_code}" = "JOC-400" ]
+            then
+                LogWarning "Get_Dependencies() could not find objects: ${response_json}"
+                exit 3
+            else
+                LogError "Get_Dependencies() failed: ${response_json}"
+                exit 4
+            fi
+        fi
+    else
+        LogError "Get_Dependencies() failed: ${response_json}"
+        exit 4
+    fi
+
+    if [ "${no_referencing}" -eq 0 ]
+    then
+        if [ -n "${folder}" ]
+        then
+            referencing_json=$(echo "${response_json}" | jq -r "${jq_options}" '{changes: [ {configurations: [(.requestedItems[].referencedBy[] | select(.path | startswith('\"$folder/\"')) | {path: .path, name: .name, objectType: .objectType} )] }] }')
+        else
+            referencing_json=$(echo "${response_json}" | jq -r "${jq_options}" '{changes: [ {configurations: [(.requestedItems[].referencedBy[] | {path: .path, name: .name, objectType: .objectType} )] }] }')
+        fi
+
+        LogVerbose ".... response for referencing objects:"
+        LogVerbose "${referencing_json}"
+    else
+        referencing_json="{\"changes\": []}"
+    fi
+
+    if [ "${no_references}" -eq 0 ]
+    then
+        if [ -n "${folder}" ]
+        then
+            referenced_json=$(echo "${response_json}" | jq -r "${jq_options}" '{changes: [ {configurations: [(.requestedItems[].references[] | select(.path | startswith('\"$folder/\"')) | {path: .path, name: .name, objectType: .objectType} )] }] }')
+        else
+            referenced_json=$(echo "${response_json}" | jq -r "${jq_options}" '{changes: [ {configurations: [(.requestedItems[].references[] | {path: .path, name: .name, objectType: .objectType} )] }] }')
+        fi
+
+        LogVerbose ".... response for referenced objects:"
+        LogVerbose "${referenced_json}"
+    else
+        referenced_json="{\"changes\": []}"
+    fi
+
+    if [ -n "${folder}" ]
+    then
+        response_json=$(jq --argjson changes "${changes_json}" --argjson referencing "${referencing_json}" --argjson referenced "${referenced_json}" -n "${jq_options}" '{changes: [{ configurations: [($changes, $referencing, $referenced | .changes[].configurations[] | select(.path | startswith('\"$folder/\"')) | {path: .path, objectType: .objectType})] | unique }] }')
+    else
+        response_json=$(jq --argjson changes "${changes_json}" --argjson referencing "${referencing_json}" --argjson referenced "${referenced_json}" -n "${jq_options}" '{changes: [{ configurations: [($changes, $referencing, $referenced | .changes[].configurations[] | {path: .path, objectType: .objectType})] | unique }] }')
+    fi
+
+    LogVerbose ".... response for changes and dependencies:"
+    LogVerbose "${response_json}"
+
+    echo "${response_json}" | jq -r '.'
+}
+
 Export()
 {
+    if [ -n "${change}" ]
+    then
+        changes_json=$(Get_Changes)
+        
+        if [ "${no_referencing}" -eq 0 ] || [ "${no_references}" -eq 0 ]
+        then
+            changes_json=$(Get_Change_Dependencies)
+        fi
+    else
+        changes_json=
+    fi
+
     LogVerbose ".. Export()"
     Curl_Options
 
@@ -296,27 +468,27 @@ Export()
     # Deployables
     request_comma=
     
-    if [[ "${deployable_object_type}" == *${object_type}* ]]
+    if [[ "${deployable_object_types}" == *${object_type}* ]]
     then
         request_body="${request_body}, \"deployables\": {"
 
         if [ "${no_draft}" = "false" ]
         then
-            request_body="${request_body}${request_comma} \"draftConfigurations\": ["
-            request_comma=,
-        
             if [ -n "${object_path}" ]
             then
+                request_body="${request_body}${request_comma} \"draftConfigurations\": ["
                 comma=
                 set -- "$(echo "${object_path}" | sed -r 's/[,]+/ /g')"
                 for i in $@; do
                     request_body="${request_body}${comma} { \"configuration\": { \"path\": \"${i}\", \"objectType\": \"${object_type}\", \"recursive\": ${recursive} } }"
                     comma=,
                 done
+                request_body="${request_body} ]"
             fi
     
-            if [ -n "${folder}" ]
+            if [ -n "${folder}" ] && [ -z "${change}" ]
             then
+                request_body="${request_body}${request_comma} \"draftConfigurations\": ["
                 comma=
                 set -- "$(echo "${folder}" | sed -r 's/[,]+/ /g')"
                 for i in $@; do
@@ -325,27 +497,33 @@ Export()
                 done
                 request_body="${request_body} ]"
             fi
-    
-            request_body="${request_body} ]"
+
+            if [ -n "${change}" ] && [ -n "${changes_json}" ]
+            then
+                request_body=$(echo "${request_body}${request_comma} \"draftConfigurations\":")$(echo "${changes_json}" | jq "${jq_options}" '{draftConfigurations: [(.changes[].configurations[] | select(.objectType | inside('\"$deployable_object_types\"')) | { configuration: {path: .path, objectType: .objectType} } )]} | .[]')
+            fi    
+
+            request_comma=,
         fi
     
         if [ "${no_deployed}" = "false" ]
         then
-            request_body="${request_body}${request_comma} \"deployConfigurations\": ["
-            request_comma=,
         
             if [ -n "${object_path}" ]
             then
+                request_body="${request_body}${request_comma} \"deployConfigurations\": ["
                 comma=
                 set -- "$(echo "${object_path}" | sed -r 's/[,]+/ /g')"
                 for i in $@; do
                     request_body="${request_body}${comma} { \"configuration\": { \"path\": \"${i}\", \"objectType\": \"${object_type}\", \"recursive\": ${recursive} } }"
                     comma=,
                 done
+                request_body="${request_body} ]"
             fi
     
-            if [ -n "${folder}" ]
+            if [ -n "${folder}" ] && [ -z "${changes_json}" ]
             then
+                request_body="${request_body}${request_comma} \"deployConfigurations\": ["
                 comma=
                 set -- "$(echo "${folder}" | sed -r 's/[,]+/ /g')"
                 for i in $@; do
@@ -354,35 +532,79 @@ Export()
                 done
                 request_body="${request_body} ]"
             fi
-    
-            request_body="${request_body} ]"
+
+            if [ -n "${change}" ] && [ -n "${changes_json}" ]
+            then
+                request_body=$(echo "${request_body}${request_comma} \"deployConfigurations\":")$(echo "${changes_json}" | jq "${jq_options}" '{deployConfigurations: [(.changes[].configurations[] | select(.objectType | inside('\"$deployable_object_types\"')) | { configuration: {path: .path, objectType: .objectType} } )]} | .[]')
+            fi    
+
+            request_comma=,
         fi
+
+        request_body="${request_body} }"
     fi
 
     # Releasables
     request_comma=
 
-    if [[ "${releasable_object_type}" == *${object_type}* ]] && [ "${for_signing}" -eq 0 ]
+    if [[ "${releasable_object_types}" == *${object_type}* ]] && [ "${for_signing}" -eq 0 ]
     then
         request_body="${request_body}, \"releasables\": {"
+        request_comma=
 
         if [ "${no_draft}" = "false" ]
         then
-            request_body="${request_body} \"draftConfigurations\": ["
-            request_comma=,
-
             if [ -n "${object_path}" ]
             then
+                request_body="${request_body}${request_comma} \"draftConfigurations\": ["
                 comma=
                 set -- "$(echo "${object_path}" | sed -r 's/[,]+/ /g')"
                 for i in $@; do
                     request_body="${request_body}${comma} { \"configuration\": { \"path\": \"${i}\", \"objectType\": \"${object_type}\", \"recursive\": ${recursive} } }"
                     comma=,
                 done
+                request_body="${request_body} ]"
             fi
     
-            if [ -n "${folder}" ]
+            if [ -n "${folder}" ] && [ -z "${changes_json}" ]
             then
+                request_body="${request_body}${request_comma} \"draftConfigurations\": ["
+                request_comma=,
+                comma=
+                set -- "$(echo "${folder}" | sed -r 's/[,]+/ /g')"
+                for i in $@; do
+                    request_body="${request_body}${comma} { \"configuration\": { \"path\": \"${i}\", \"objectType\": \"FOLDER\", \"recursive\": ${recursive} } }"
+                    comma=,
+                done
+                request_body="${request_body} ]"
+            fi
+
+            if [ -n "${change}" ] && [ -n "${changes_json}" ]
+            then
+                request_body=$(echo "${request_body}${request_comma} \"draftConfigurations\":")$(echo "${changes_json}" | jq "${jq_options}" '{draftConfigurations: [(.changes[].configurations[] | select(.objectType | inside('\"$releasable_object_types\"')) | { configuration: {path: .path, objectType: .objectType} } )]} | .[]')
+            fi    
+
+            request_comma=,
+        fi
+
+        if [ "${no_released}" = "false" ]
+        then
+            if [ -n "${object_path}" ]
+            then
+                request_body="${request_body}${request_comma} \"releasedConfigurations\": ["
+                request_comma=,
+                comma=
+                set -- "$(echo "${object_path}" | sed -r 's/[,]+/ /g')"
+                for i in $@; do
+                    request_body="${request_body}${comma} { \"configuration\": { \"path\": \"${i}\", \"objectType\": \"${object_type}\", \"recursive\": ${recursive} } }"
+                    comma=,
+                done
+                request_body="${request_body} ]"
+            fi
+    
+            if [ -n "${folder}" ] && [ -z "${changes_json}" ]
+            then
+                request_body="${request_body}${request_comma} \"releasedConfigurations\": ["
                 comma=
                 set -- "$(echo "${folder}" | sed -r 's/[,]+/ /g')"
                 for i in $@; do
@@ -392,36 +614,16 @@ Export()
                 request_body="${request_body} ]"
             fi
     
-            request_body="${request_body} ]"
+            if [ -n "${change}" ] && [ -n "${changes_json}" ]
+            then
+                request_body=$(echo "${request_body}${request_comma} \"releasedConfigurations\":")$(echo "${changes_json}" | jq "${jq_options}" '{releasedConfigurations: [(.changes[].configurations[] | select(.objectType | inside('\"$releasable_object_types\"')) | { configuration: {path: .path, objectType: .objectType} } )]} | .[]')
+            fi    
+
+            request_comma=,
+            request_body="${request_body}, \"withoutInvalid\": ${no_invalid}"
         fi
 
-        if [ "${no_released}" = "false" ]
-        then
-            request_body="${request_body}${request_comma} \"releasedConfigurations\": ["
-            request_comma=,
-        
-            if [ -n "${object_path}" ]
-            then
-                comma=
-                set -- "$(echo "${object_path}" | sed -r 's/[,]+/ /g')"
-                for i in $@; do
-                    request_body="${request_body}${comma} { \"configuration\": { \"path\": \"${i}\", \"objectType\": \"${object_type}\", \"recursive\": ${recursive} } }"
-                    comma=,
-                done
-            fi
-    
-            if [ -n "${folder}" ]
-            then
-                comma=
-                set -- "$(echo "${folder}" | sed -r 's/[,]+/ /g')"
-                for i in $@; do
-                    request_body="${request_body}${comma} { \"configuration\": { \"path\": \"${i}\", \"objectType\": \"FOLDER\", \"recursive\": ${recursive} } }"
-                    comma=,
-                done
-            fi
-    
-            request_body="${request_body} ], \"withoutInvalid\": ${no_invalid}"
-        fi
+        request_body="${request_body} }"
     fi
 
     request_body="${request_body} } }"
@@ -478,7 +680,7 @@ Export_Folder()
     else
         request_body="${request_body}, \"objectTypes\": ["
         comma=
-        set -- "$(echo "${object_types}" | sed -r 's/[,]+/ /g')"
+        set -- "$(echo "${deployable_object_types},${releasable_object_types}" | sed -r 's/[,]+/ /g')"
         for i in $@; do
             request_body="${request_body}${comma} \"${i}\""
             comma=,
@@ -655,10 +857,23 @@ Import_Deploy()
 
 Deploy()
 {
+    if [ -n "${change}" ]
+    then
+        changes_json=$(Get_Changes)
+        
+        if [ "${no_referencing}" -eq 0 ] || [ "${no_references}" -eq 0 ]
+        then
+            changes_json=$(Get_Change_Dependencies)
+        fi
+    else
+        changes_json=
+    fi
+
     LogVerbose ".. Deploy()"
     Curl_Options
 
     request_body="{"
+    request_comma=
 
     if [ -n "${controller_id}" ]
     then
@@ -670,23 +885,35 @@ Deploy()
             comma=,
         done
         request_body="${request_body} ]"
+        request_comma=,
     fi
     
     if [ -n "${date_from}" ]
     then
-        request_body="${request_body}, \"addOrdersDateFrom\": \"${date_from}\""
+        request_body="${request_body}${request_comma} \"addOrdersDateFrom\": \"${date_from}\""
+        request_comma=,
     fi
 
-    request_body="${request_body}, \"store\": {"
+    request_body="${request_body}${request_comma} \"store\": {"
     request_comma=
 
     if [ "${no_draft}" = "false" ]
     then
-        request_comma=,
-        request_body="${request_body} \"draftConfigurations\": ["
-
-        if [ -n "${folder}" ]
+        if [ -n "${object_path}" ]
         then
+            request_body="${request_body}${request_comma} \"draftConfigurations\": ["
+            comma=
+            set -- "$(echo "${object_path}" | sed -r 's/[,]+/ /g')"
+            for i in $@; do
+                request_body="${request_body}${comma} { \"configuration\": { \"path\": \"${i}\", \"objectType\": \"${object_type}\", \"recursive\": ${recursive} } }"
+                comma=,
+            done
+            request_body="${request_body} ]"
+        fi
+
+        if [ -n "${folder}" ] && [ -z "${change}" ]
+        then
+            request_body="${request_body}${request_comma} \"draftConfigurations\": ["
             comma=
             set -- "$(echo "${folder}" | sed -r 's/[,]+/ /g')"
             for i in $@; do
@@ -696,24 +923,31 @@ Deploy()
             request_body="${request_body} ]"
         fi
 
-        if [ -n "${object_path}" ]
+        if [ -n "${change}" ] && [ -n "${changes_json}" ]
         then
-            comma=
-            set -- "$(echo "${object_path}" | sed -r 's/[,]+/ /g')"
-            for i in $@; do
-                request_body="${request_body}${comma} { \"configuration\": { \"path\": \"${i}\", \"objectType\": \"${object_type}\", \"recursive\": ${recursive} } }"
-                comma=,
-            done
-            request_body="${request_body} ]"
-        fi
+            request_body=$(echo "${request_body}${request_comma} \"draftConfigurations\":")$(echo "${changes_json}" | jq "${jq_options}" '{draftConfigurations: [(.changes[].configurations[] | select(.objectType | inside('\"$deployable_object_types\"')) | { configuration: {path: .path, objectType: .objectType} } )]} | .[]')
+        fi    
+
+        request_comma=,
     fi
 
     if [ "${no_deployed}" = "false" ]
     then
-        request_body="${request_body}${request_comma} \"deployConfigurations\": ["
-
-        if [ -n "${folder}" ]
+        if [ -n "${object_path}" ]
         then
+            request_body="${request_body}${request_comma} \"deployConfigurations\": ["
+            comma=
+            set -- "$(echo "${object_path}" | sed -r 's/[,]+/ /g')"
+            for i in $@; do
+                request_body="${request_body}${comma} { \"configuration\": { \"path\": \"${i}\", \"objectType\": \"${object_type}\", \"recursive\": ${recursive} } }"
+                comma=,
+            done
+            request_body="${request_body} ]"
+        fi
+
+        if [ -n "${folder}" ] && [ -z "${change}" ]
+        then
+            request_body="${request_body}${request_comma} \"deployConfigurations\": ["
             comma=
             set -- "$(echo "${folder}" | sed -r 's/[,]+/ /g')"
             for i in $@; do
@@ -723,16 +957,12 @@ Deploy()
             request_body="${request_body} ]"
         fi
 
-        if [ -n "${object_path}" ]
+        if [ -n "${change}" ] && [ -n "${changes_json}" ]
         then
-            comma=
-            set -- "$(echo "${object_path}" | sed -r 's/[,]+/ /g')"
-            for i in $@; do
-                request_body="${request_body}${comma} { \"configuration\": { \"path\": \"${i}\", \"objectType\": \"${object_type}\", \"recursive\": ${recursive} } }"
-                comma=,
-            done
-            request_body="${request_body} ]"
-        fi
+            request_body=$(echo "${request_body}${request_comma} \"deployConfigurations\":")$(echo "${changes_json}" | jq "${jq_options}" '{deployConfigurations: [(.changes[].configurations[] | select(.objectType | inside('\"$deployable_object_types\"')) | { configuration: {path: .path, objectType: .objectType} } )]} | .[]')
+        fi    
+
+        request_comma=,
     fi
 
     request_body="${request_body} }"
@@ -842,6 +1072,18 @@ Revoke()
 
 Release()
 {
+    if [ -n "${change}" ]
+    then
+        changes_json=$(Get_Changes)
+        
+        if [ "${no_referencing}" -eq 0 ] || [ "${no_references}" -eq 0 ]
+        then
+            changes_json=$(Get_Change_Dependencies)
+        fi
+    else
+        changes_json=
+    fi
+
     LogVerbose ".. Release()"
     Curl_Options
 
@@ -854,29 +1096,36 @@ Release()
         request_comma=,
     fi
 
-    request_body="${request_body}${request_comma} \"update\": ["
-
     if [ -n "${object_path}" ]
     then
+        request_body="${request_body}${request_comma} \"update\": ["
         comma=
         set -- "$(echo "${object_path}" | sed -r 's/[,]+/ /g')"
         for i in $@; do
             request_body="${request_body}${comma} { \"path\": \"${i}\", \"objectType\": \"${object_type}\", \"recursive\": ${recursive} }"
             comma=,
         done
+        request_body="${request_body} ]"
     fi
 
-    if [ -n "${folder}" ]
+    if [ -n "${folder}" ] && [ -z "${change}" ]
     then
+        request_body="${request_body}${request_comma} \"update\": ["
         comma=
         set -- "$(echo "${folder}" | sed -r 's/[,]+/ /g')"
         for i in $@; do
             request_body="${request_body}${comma} { \"path\": \"${i}\", \"objectType\": \"FOLDER\", \"recursive\": ${recursive} }"
             comma=,
         done
+        request_body="${request_body} ]"
     fi
 
-    request_body="${request_body} ] }"
+    if [ -n "${change}" ] && [ -n "${changes_json}" ]
+    then
+        request_body=$(echo "${request_body} \"update\":")$(echo "${changes_json}" | jq "${jq_options}" '{deployConfigurations: [(.changes[].configurations[] | select(.objectType | inside('\"$releasable_object_types\"')) | {path: .path, objectType: .objectType} )]} | .[]')
+    fi    
+
+    #request_body="${request_body} }"
     Audit_Log_Request
     request_body="${request_body} }"
 
@@ -1044,6 +1293,53 @@ Store()
         LogError "Store() failed: ${response_json}"
         exit 4
     fi
+}
+
+Get_Path()
+{
+    name=$1
+
+    LogVerbose ".. Get_Path(): ${name}"
+    Curl_Options
+
+    if [ "${no_draft}" = "true" ]
+    then
+        use_drafts=false
+    else
+        use_drafts=true
+    fi
+
+    request_body="{ \"name\": \"$name\", \"objectType\": \"${object_type}\", \"useDrafts\": ${use_drafts}"
+    Audit_Log_Request
+    request_body="${request_body} }"
+
+    LogVerbose ".... request:"
+    LogVerbose "curl ${curl_log_options[*]} -H \"X-Access-Token: ${access_token}\" -H \"Accept: application/json\" -H \"Content-Type: application/json\" -d ${request_body} ${joc_url}/joc/api/inventory/path"
+    response_json=$(curl "${curl_options[@]}" -H "X-Access-Token: ${access_token}" -H "Accept: application/json" -H "Content-Type: application/json" -d "${request_body}" "${joc_url}"/joc/api/inventory/path)
+    LogVerbose ".... response:"
+    LogVerbose "${response_json}"
+
+    if echo "${response_json}" | jq -e . >/dev/null 2>&1
+    then
+        path=$(echo "${response_json}" | jq -r '.path // empty' | sed 's/^"//' | sed 's/"$//')
+        if [ -z "${path}" ]
+        then
+            error_code=$(echo "${response_json}" | jq -r '.error.code // empty' | sed 's/^"//' | sed 's/"$//')
+            if [ "${error_code}" = "JOC-400" ]
+            then
+                LogWarning "Get_Path() could not find objects: ${response_json}"
+                exit 3
+            else
+                LogError "Get_Path() failed: ${response_json}"
+                exit 4
+            fi
+        fi
+    else
+        LogError "Get_Path() failed: ${response_json}"
+        exit 4
+    fi
+    
+    echo "${path}"
 }
 
 Revalidate_Folder()
@@ -1409,14 +1705,17 @@ Usage()
     >&"$1" echo "    export            --file [--format] --path --type [--use-short-path] [--start-folder] [--for-signing]"
     >&"$1" echo "    ..                --file [--format] --folder [--recursive] [--type] [--use-short-path] [--for-signing]"
     >&"$1" echo "                             [--no-draft] [--no-deployed] [--no-released] [--no-invalid]"
+    >&"$1" echo "                             [--change] [--no-referencing] [--no-references]"
     >&"$1" echo "    import            --file [--format] [--folder] [--overwrite] [--prefix] [--suffix]"
     >&"$1" echo "    import-deploy     --file [--format] [--folder] [--algorithm]"
     >&"$1" echo "    deploy            --path --type [--date-from] [--no-draft] [--no-deployed]"
     >&"$1" echo "    ..                --folder [--recursive] [--date-from] [--no-draft] [--no-deployed]"
+    >&"$1" echo "                               [--change] [--no-referencing] [--no-references]"
     >&"$1" echo "    revoke            --path --type"
     >&"$1" echo "    ..                --folder [--recursive]"
     >&"$1" echo "    release           --path --type [--date-from]"
     >&"$1" echo "    ..                --folder [--recursive] [--date-from]"
+    >&"$1" echo "                               [--change] [--no-referencing] [--no-references]"
     >&"$1" echo "    recall            --path --type"
     >&"$1" echo "    ..                --folder [--recursive] [--type]"
     >&"$1" echo "    store             --path --type --file"
@@ -1448,6 +1747,7 @@ Usage()
     >&"$1" echo "    --path=<path[,path]>               | optional: list of inventory paths to objects"
     >&"$1" echo "    --type=<type[,type]>               | optional: list of object types such as WORKFLOW,SCHEDULE"
     >&"$1" echo "    --new-path=<path>                  | optional: new object path on restore"
+    >&"$1" echo "    --change=<change[,change]>         | optional: inventory changes of objects"
     >&"$1" echo "    --prefix=<string>                  | optional: prefix for duplicate objects on import"
     >&"$1" echo "    --suffix=<string>                  | optional: suffix for duplicate objects on import"
     >&"$1" echo "    --algorithm=<identifier>           | optional: signature algorithm for import, default: SHA512withECDSA"
@@ -1477,10 +1777,12 @@ Usage()
     >&"$1" echo "    -o | --overwrite                   | overwrites objects on import"
     >&"$1" echo "    -s | --for-signing                 | exports objects for digital signing"
     >&"$1" echo "    -u | --use-short-path              | exports relative paths"
-    >&"$1" echo "    --no-draft                         | exccludes draft objects"
-    >&"$1" echo "    --no-deployed                      | exccludes deployed objects"
-    >&"$1" echo "    --no-released                      | exccludes released objects"
-    >&"$1" echo "    --no-invalid                       | exccludes invalid objects"
+    >&"$1" echo "    --no-referencing                   | excludes referencing objects when used with --change"
+    >&"$1" echo "    --no-references                    | excludes referenced objects when used with --change"
+    >&"$1" echo "    --no-draft                         | excludes draft objects"
+    >&"$1" echo "    --no-deployed                      | excludes deployed objects"
+    >&"$1" echo "    --no-released                      | excludes released objects"
+    >&"$1" echo "    --no-invalid                       | excludes invalid objects"
     >&"$1" echo "    --show-logs                        | shows log output if --log-dir is used"
     >&"$1" echo "    --make-dirs                        | creates directories if they do not exist"
     >&"$1" echo ""
@@ -1543,6 +1845,8 @@ Arguments()
                                     ;;
             --type=*)               object_type=$(echo "${option}" | sed 's/--type=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
                                     ;;
+            --change=*)             change=$(echo "${option}" | sed 's/--change=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
             --prefix=*)             prefix=$(echo "${option}" | sed 's/--prefix=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
                                     ;;
             --suffix=*)             suffix=$(echo "${option}" | sed 's/--suffix=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
@@ -1586,6 +1890,7 @@ Arguments()
                                     exit
                                     ;;
             -v|--verbose)           verbose=$((verbose + 1))
+                                    jq_options=-M
                                     ;;
             -p|--password)          AskPassword
                                     ;;
@@ -1606,6 +1911,10 @@ Arguments()
             --no-released)          no_released=true
                                     ;;
             --no-invalid)           no_invalid=true
+                                    ;;
+            --no-referencing)       no_referencing=1
+                                    ;;
+            --no-references)        no_references=1
                                     ;;
             --make-dirs)            make_dirs=1
                                     ;;
@@ -1643,10 +1952,10 @@ Arguments()
             exit 1
         fi
     
-        if [ -z "${joc_user}" ]
+        if [ -z "${joc_user}" ] && [ -z "${joc_client_key}" ]
         then
             Usage 2
-            LogError "JOC Cockpit user account not specified: --user=<account>"
+            LogError "No JOC Cockpit client authentication certificate and no user account specified: --user=<account>"
             exit 1
         fi
     
@@ -1716,7 +2025,7 @@ Arguments()
         if [ -n "${prefix}" ] || [ -n "${suffix}" ]
         then
             Usage 2
-            LogError "Command '${action}' using --overwrite=true denies to specify --prefix or --suffix"
+            LogError "Command '${action}' using --overwrite denies to specify --prefix or --suffix"
             exit 1
         fi
     fi
@@ -1732,13 +2041,30 @@ Arguments()
     actions="|export|deploy|revoke|release|recall|remove|restore|delete|"
     if [[ "${actions}" == *"|${action}|"* ]] && [ -z "${folder}" ] && [ -z "${object_path}" ]
     then
-        Usage 2
-        LogError "Command '${action}' requires to specify one of the options: --folder=, --path="
-        exit 1
+        if [ "${action}" = "export" ] || [ "${action}" = "deploy" ] || [ "${action}" = "release" ]
+        then
+            if [ -z "${change}" ]
+            then
+                Usage 2
+                LogError "Command '${action}' requires to specify one of the options: --folder=, --path=, --change="
+                exit 1        
+            else
+                if [ "${no_draft}" = "true" ] || [ "${no_deployed}" = "true" ] || [ "${no_released}" = "true" ] || [ "${no_invalid}" = "true" ]
+                then
+                    Usage 2
+                    LogError "Command '${action}' used with the --change option denies use of the switches: --no-draft, --no-deployed, --no-released, --no-invalid"
+                exit 1        
+                fi
+            fi
+        else
+            Usage 2
+            LogError "Command '${action}' requires to specify one of the options: --folder=, --path="
+            exit 1
+        fi
     fi
 
     actions="|export|deploy|revoke|release|recall|store|remove|restore|delete|"
-    if [[ "${actions}" == *"|${action}|"* ]]&& [ -n "${object_path}" ] && [ -z "${object_type}" ]
+    if [[ "${actions}" == *"|${action}|"* ]] && [ -n "${object_path}" ] && [ -z "${object_type}" ]
     then
         Usage 2
         LogError "Command '${action}' using --path option requires to specify the object type: --type="
@@ -1967,15 +2293,33 @@ Arguments()
 Process()
 {
     LogVerbose ".. Processing"
-    
+
     actions="|sign|encrypt|decrypt|"
     if [[ "${actions}" != *"|${action}|"* ]]
     then
         Login
+        Compatiblity_Settings
+    fi
+
+    if [ -n "${object_path}" ]
+    then
+        comma=
+        object_full_path=
+        set -- "$(echo "${object_path}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            case "${i}" in
+                */*)    object_full_path=${object_full_path}${comma}${i}
+                        ;;
+                *)      object_full_path=${object_full_path}${comma}$(Get_Path "$i")
+                        ;;
+            esac
+            comma=,
+        done
+        object_path=${object_full_path}
     fi
 
     case "${action}" in
-        export)             if [ -z "${folder}" ]
+        export)             if [ -z "${folder}" ] || [ -n "${change}" ]
                             then
                                 Export
                             else
@@ -2116,6 +2460,9 @@ End()
     unset prefix
     unset suffix
     unset signature_algorithm
+    unset change
+    unset no_referencing
+    unset no_references
 
     unset sign_file
     unset sign_dir
@@ -2140,10 +2487,12 @@ End()
     unset start_time
 
     unset response_json
+    unset changes_json
     unset access_token
     unset curl_options
     unset curl_log_options
     unset action
+    unset jq_options
 
     set +e
 }

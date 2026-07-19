@@ -4,7 +4,7 @@ set -e
 
 # ------------------------------------------------------------
 # Company:  Software- und Organisations-Service GmbH
-# Date:     2024-08-24
+# Date:     2026-06-14
 # Purpose:  Status Operations on JOC Cockpit
 # ------------------------------------------------------------
 #
@@ -34,6 +34,7 @@ show_logs=
 log_dir=
 log_dir=
 verbose=0
+verbose_chars=300
 action=
 
 item=
@@ -49,7 +50,40 @@ member_id=
 version=
 agent_id=
 settings=
+proxies=0
 json=0
+csv=0
+late=false
+recursive=false
+
+order_id=
+order_tag=
+workflow=
+folder=
+schedule=
+schedule_folder=
+tag=
+order_tag=
+limit=0
+job=
+criticality=
+date_from=
+date_to=
+date_from_completed=
+date_to_completed=
+time_zone=
+state=
+operation=
+profile=
+source_host=
+source_protocol=
+source_file=
+target_host=
+target_protocol=
+target_file=
+min_files=0
+max_files=0
+include_files=0
 
 agent_id=
 agent_state=
@@ -69,6 +103,8 @@ java_lib="${script_home}"/lib
 audit_message=
 audit_time_spent=0
 audit_link=
+
+tmp_dir=
 
 # ------------------------------
 # Inline Functions
@@ -126,7 +162,7 @@ LogVerbose()
     
         if [ -z "${show_logs}" ]
         then
-            echo "$@"
+            >&2 echo "$@"
         fi
     fi
 }
@@ -149,6 +185,17 @@ LogError()
     fi
     
     >&2 echo "[ERROR]" "$@"
+}
+
+GetTempDirectory()
+{
+    if [ -z "${tmp_dir}" ]
+    then
+         tmp_dir=$(echo 'mkstemp(/tmp/js7.cli.XXXXXX)' | m4)
+         LogVerbose ".... GetTempDirectory: creating temporary directory: ${tmp_dir}"
+         unlink "${tmp_dir}"
+         mkdir "${tmp_dir}"
+    fi
 }
 
 Curl_Options()
@@ -402,6 +449,38 @@ Switch_Over()
         fi
     else
         LogError "Switch_Over() failed: ${response_json}"
+        exit 4
+    fi
+}
+
+Restart_Proxies()
+{
+    LogVerbose ".. Restart_Proxies()"
+    Curl_Options
+
+    request_body="{}"
+    LogVerbose "curl ${curl_log_options[*]} -H \"X-Access-Token: ${access_token}\" -H \"Accept: application/json\" -H \"Content-Type: application/json\" -d ${request_body} ${joc_url}/joc/api/joc/proxies/restart"
+    response_json=$(curl "${curl_options[@]}" -H "X-Access-Token: ${access_token}" -H "Accept: application/json" -H "Content-Type: application/json" -d "${request_body}" "${joc_url}"/joc/api/joc/proxies/restart)
+    LogVerbose ".... response:"
+    LogVerbose "${response_json}"
+
+    if echo "${response_json}" | jq -e . >/dev/null 2>&1
+    then
+        ok=$(echo "${response_json}" | jq -r '.ok // empty' | sed 's/^"//' | sed 's/"$//')
+        if [ -z "${ok}" ]
+        then
+            error_code=$(echo "${response_json}" | jq -r '.error.code // empty' | sed 's/^"//' | sed 's/"$//')
+            if [ "${error_code}" = "JOC-400" ]
+            then
+                LogWarning "Restart_Proxies() could not perform operation: ${response_json}"
+                exit 3
+            else
+                LogError "Restart_Proxies() failed: ${response_json}"
+                exit 4
+            fi
+        fi
+    else
+        LogError "Restart_Proxies() failed: ${response_json}"
         exit 4
     fi
 }
@@ -701,15 +780,15 @@ Health_Check_Database()
         count_fatal=$((count_fatal+1))
     fi
 
-    if [ "${connection_state_severity}" -gt 1 ]
+    if [ "${connection_state_severity}" -eq 1 ]
     then
-        LogWarning "Unhealthy Connection State: $database_connection_state_severity} ($connection_state_severity)"
+        LogWarning "Unhealthy Connection State: $connection_state_severity} ($connection_state_severity)"
         count_unhealthy=$((count_unhealthy+1))
     fi
 
     if [ "${connection_state_severity}" -gt 1 ]
     then
-        LogError "Fatal Connection State: $database_connection_state_severity} ($connection_state_severity)"
+        LogError "Fatal Connection State: $connection_state_severity} ($connection_state_severity)"
         count_fatal=$((count_fatal+1))
     fi
 }
@@ -724,13 +803,17 @@ Health_Check_JOC()
         host=$(echo "${response_json}" | jq -r '.jocs['$i'].host // empty')
         url=$(echo "${response_json}" | jq -r '.jocs['$i'].url // empty')
         title=$(echo "${response_json}" | jq -r '.jocs['$i'].title // empty')
-        current=$(echo "${response_json}" | jq -r '.jocs['$i'].current // empty')
         cluster_node_state_text=$(echo "${response_json}" | jq -r '.jocs['$i'].clusterNodeState._text // empty')
         cluster_node_state_severity=$(echo "${response_json}" | jq -r '.jocs['$i'].clusterNodeState.severity // empty')
         component_state_text=$(echo "${response_json}" | jq -r '.jocs['$i'].componentState._text // empty')
         component_state_severity=$(echo "${response_json}" | jq -r '.jocs['$i'].componentState.severity // empty')
         connection_state_text=$(echo "${response_json}" | jq -r '.jocs['$i'].connectionState._text // empty')
         connection_state_severity=$(echo "${response_json}" | jq -r '.jocs['$i'].connectionState.severity // empty')
+
+        cluster_node_state_severity=${cluster_node_state_severity:-1}
+        component_state_severity=${component_state_severity:-1}
+        connection_state_severity=${connection_state_severity:-1}
+
 
         Log "JOC Cockpit: ${title}, URL: ${url}, Date: ${survey_date}"
         Log "    Cluster Node State: ${cluster_node_state_text} ($cluster_node_state_severity)"
@@ -837,6 +920,10 @@ Health_Check_Controller()
         connection_state_text=$(echo "${response_json}" | jq -r '.controllers['$i'].connectionState._text // empty')
         connection_state_severity=$(echo "${response_json}" | jq -r '.controllers['$i'].connectionState.severity // empty')
 
+        cluster_node_state_severity=${cluster_node_state_severity:-1}
+        component_state_severity=${component_state_severity:-1}
+        connection_state_severity=${connection_state_severity:-1}
+
         Log "${role} Controller: ${title}, ID: ${controller_controller_id}, URL: ${url}, is coupled: ${is_coupled}, Date: ${survey_date}"
         Log "    Cluster Node State: ${cluster_node_state_text} ($cluster_node_state_severity)"
         Log "    Component State:    ${component_state_text} (${component_state_severity})"
@@ -926,7 +1013,6 @@ Health_Check_Agent()
         if [ "${length}" -eq 0 ]
         then
             role=STANDALONE
-            agent_host=$(echo "${response_json_agent}" | jq -r '.agents['$i'].url // empty' | cut -d'/' -f3 | cut -d':' -f1)
             agent_url=$(echo "${response_json_agent}" | jq -r '.agents['$i'].url // empty')
             agent_disabled=$(echo "${response_json_agent}" | jq -r '.agents['$i'].disabled // empty')
             agent_component_state_text=$(echo "${response_json_agent}" | jq -r '.agents['$i'].state._text // empty')
@@ -957,6 +1043,11 @@ Health_Check_Agent()
             agent_cluster_secondary_subagent_id=$(echo "${response_json_agent}" | jq -r '.agents['$i'].subagents[] | select(.isDirector == "SECONDARY_DIRECTOR").subagentId // empty')
             agent_cluster_secondary_url=$(echo "${response_json_agent}" | jq -r '.agents['$i'].subagents[] | select(.isDirector == "SECONDARY_DIRECTOR").url // empty')
             agent_cluster_secondary_host=$(echo "${response_json_agent}" | jq -r '.agents['$i'].subagents[] | select(.isDirector == "SECONDARY_DIRECTOR").url // empty' | cut -d'/' -f3 | cut -d':' -f1)
+
+            agent_cluster_primary_component_state_severity=${agent_cluster_primary_component_state_severity:-1}
+            agent_cluster_primary_node_state_severity=${agent_cluster_primary_node_state_severity:-1}
+            agent_cluster_secondary_component_state_severity=${agent_cluster_secondary_component_state_severity:-1}
+            agent_cluster_secondary_node_state_severity=${agent_cluster_secondary_node_state_severity:-1}
 
             Log "${role} Agent: ${agent_name}, ID: ${agent_agent_id}, Controller ID: ${agent_controller_id}, Date: ${agent_survey_date}"
             Log "  PRIMARY DIRECTOR:     Subagent ID: ${agent_cluster_primary_subagent_id}, URL: ${agent_cluster_primary_url}"
@@ -1196,6 +1287,905 @@ Version()
     fi
 }
 
+Report_Daily_Plan()
+{
+    LogVerbose ".. Report_Daily_Plan()"
+    Curl_Options
+
+    request_body="{ \"controllerId\": \"${controller_id}\"" 
+
+    if [ -n "${date_from}" ]
+    then
+        request_body="${request_body}, \"dailyPlanDateFrom\": \"${date_from}\"" 
+    fi
+
+    if [ -n "${date_to}" ]
+    then
+        request_body="${request_body}, \"dailyPlanDateTo\": \"${date_to}\"" 
+    fi
+
+    if [ -n "${order_id}" ]
+    then
+        request_body="${request_body}, \"orderIds\": ["
+        comma=
+        set -- "$(echo "${order_id}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${workflow}" ]
+    then
+        request_body="${request_body}, \"workflowPaths\": ["
+        comma=
+        set -- "$(echo "${workflow}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${folder}" ]
+    then
+        request_body="${request_body}, \"workflowFolders\": ["
+        comma=
+        set -- "$(echo "${folder}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} { \"folder\": \"${i}\", \"recursive\": ${recursive} }"
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${schedule}" ]
+    then
+        request_body="${request_body}, \"schedulePaths\": ["
+        comma=
+        set -- "$(echo "${schedule}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${schedule_folder}" ]
+    then
+        request_body="${request_body}, \"scheduleFolders\": ["
+        comma=
+        set -- "$(echo "${schedule_folder}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} { \"folder\": \"${i}\", \"recursive\": ${recursive} }"
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${tag}" ]
+    then
+        request_body="${request_body}, \"workflowTags\": ["
+        comma=
+        set -- "$(echo "${tag}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${order_tag}" ]
+    then
+        request_body="${request_body}, \"orderTags\": ["
+        comma=
+        set -- "$(echo "${order_tag}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${controller_id}" ]
+    then
+        request_body="${request_body}, \"controllerIds\": ["
+        comma=
+        set -- "$(echo "${controller_id}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${state}" ]
+    then
+        request_body="${request_body}, \"states\": ["
+        comma=
+        set -- "$(echo "${state}" | tr '[:lower:]' '[:upper:]' | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    request_body="${request_body}, \"late\": ${late}" 
+
+    Audit_Log_Request
+    request_body="${request_body} }"
+
+    GetTempDirectory
+    daily_plan_file="${tmp_dir}/daily-plan.json"
+
+    LogVerbose ".... request:"
+    LogVerbose "curl ${curl_log_options[*]} -H \"X-Access-Token: ${access_token}\" -H \"Accept: application/json\" -H \"Content-Type: application/json\" -d ${request_body} ${joc_url}/joc/api/daily_plan/orders -o ${daily_plan_file}"
+
+    curl "${curl_options[@]}" -H "X-Access-Token: ${access_token}" -H "Accept: application/json" -H "Content-Type: application/json" -d "${request_body}" "${joc_url}"/joc/api/daily_plan/orders -o "${daily_plan_file}"
+    
+    if [ "${verbose}" -gt 0 ]
+    then
+        LogVerbose ".... response:"
+        >&2 head -c "${verbose_chars}" "${daily_plan_file}"
+        >&2 echo " ..."
+    fi
+
+    if <"${daily_plan_file}" jq -e . >/dev/null 2>&1
+    then
+        ok=$(<"${daily_plan_file}" jq -r '.plannedOrderItems // empty' | sed 's/^"//' | sed 's/"$//')
+        if [ -z "${ok}" ]
+        then
+            error_code=$(<"${daily_plan_file}" jq -r '.error.code // empty' | sed 's/^"//' | sed 's/"$//')
+            if [ "${error_code}" = "JOC-400" ]
+            then
+                LogWarning "Report_Daily_Plan() could not perform operation:"
+                >&2 head -c "${verbose_chars}" "${daily_plan_file}"
+                >&2 echo " ..."
+                exit 3
+            else
+                LogError "Report_Daily_Plan() failed:"
+                >&2 head -c "${verbose_chars}" "${daily_plan_file}"
+                >&2 echo " ..."
+                exit 4
+            fi
+        fi
+    else
+        LogError "Report_Daily_Plan() failed:"
+        >&2 head -c "${verbose_chars}" "${daily_plan_file}"        
+        >&2 echo " ..."
+        exit 4
+    fi
+
+    if [ "${csv}" -eq 1 ]
+    then
+        # credits to https://stackoverflow.com/questions/57242240/jq-object-cannot-be-csv-formatted-only-array
+        json_module=/tmp/json2csv.jq
+        echo '
+def json2headers:
+  def isscalar: type | . != "array" and . != "object";
+  def isflat: all(.[]; isscalar);
+  paths as $p
+  | getpath($p)
+  | if type == "array" and isflat then $p
+     elif isscalar and (($p[-1]|type) == "string") then $p
+     else empty end ;
+
+def json2array($header):
+  def value($p):
+    try getpath($p) catch null
+    | if type == "object" then null else . end;
+  [$header[] as $p | value($p)];
+
+def json2csv:
+  ( [.[] | json2headers] | unique) as $h
+  | ([$h[]|join("_") ],
+     (.[]
+      | json2array($h)
+      | map( if type == "array" then map(tostring)|join("|") else tostring end)))
+  | @csv ;        
+' > "${json_module}"
+        <"${daily_plan_file}" jq -r -L /tmp 'include "json2csv"; .plannedOrderItems | json2csv // empty'
+    else
+        <"${daily_plan_file}" jq -r '.plannedOrderItems // empty'
+    fi
+}
+
+Report_Order_History()
+{
+    LogVerbose ".. Report_Order_History()"
+    Curl_Options
+
+    request_body="{ \"controllerId\": \"${controller_id}\"" 
+
+    if [ -n "${date_from}" ]
+    then
+        [[ "$date_from" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[1-2][0-9]|3[0-1]) ]] && date_from=$(date --date "${date_from}" +'%Y-%m-%dT%H:%M:%S')
+        request_body="${request_body}, \"dateFrom\": \"${date_from}\"" 
+    fi
+
+    if [ -n "${date_to}" ]
+    then
+        [[ "$date_to" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[1-2][0-9]|3[0-1]) ]] && date_to=$(date --date "${date_to}" +'%Y-%m-%dT%H:%M:%S')
+        request_body="${request_body}, \"dateTo\": \"${date_to}\"" 
+    fi
+
+    if [ -n "${date_from_completed}" ]
+    then
+        [[ "$date_from_completed" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[1-2][0-9]|3[0-1]) ]] && date_from_completed=$(date --date "${date_from_completed}" +'%Y-%m-%dT%H:%M:%S')
+        request_body="${request_body}, \"completedDateFrom\": \"${date_from_completed}\"" 
+    fi
+
+    if [ -n "${date_to_completed}" ]
+    then
+        [[ "$date_to_completed" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[1-2][0-9]|3[0-1]) ]] && date_to_completed=$(date --date "${date_to_completed}" +'%Y-%m-%dT%H:%M:%S')
+        request_body="${request_body}, \"completedDateTo\": \"${date_to_completed}\"" 
+    fi
+
+    if [ -n "${time_zone}" ]
+    then
+        request_body="${request_body}, \"timeZone\": \"${time_zone}\""
+    fi
+
+    if [ -n "${order_id}" ]
+    then
+        request_body="${request_body}, \"orderId\": \"${order_id}\"" 
+    fi
+
+    if [ -n "${workflow}" ]
+    then
+        request_body="${request_body}, \"workflowName\": \"${workflow}\""
+    fi
+
+    if [ -n "${folder}" ]
+    then
+        request_body="${request_body}, \"folders\": ["
+        comma=
+        set -- "$(echo "${folder}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} { \"folder\": \"${i}\", \"recursive\": ${recursive} }"
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${tag}" ]
+    then
+        request_body="${request_body}, \"workflowTags\": ["
+        comma=
+        set -- "$(echo "${tag}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${order_tag}" ]
+    then
+        request_body="${request_body}, \"orderTags\": ["
+        comma=
+        set -- "$(echo "${tag}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${state}" ]
+    then
+        request_body="${request_body}, \"historyStates\": ["
+        comma=
+        set -- "$(echo "${state}" | tr '[:lower:]' '[:upper:]' | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ "${limit}" -ne 0 ]
+    then
+        request_body="${request_body}, \"limit\": ${limit}"
+    fi
+
+    Audit_Log_Request
+    request_body="${request_body} }"
+
+    GetTempDirectory
+    order_history_file="${tmp_dir}/order-history.json"
+
+    LogVerbose ".... request:"
+    LogVerbose "curl ${curl_log_options[*]} -H \"X-Access-Token: ${access_token}\" -H \"Accept: application/json\" -H \"Content-Type: application/json\" -d ${request_body} ${joc_url}/joc/api/orders/history -o ${order_history_file}"
+
+    curl "${curl_options[@]}" -H "X-Access-Token: ${access_token}" -H "Accept: application/json" -H "Content-Type: application/json" -d "${request_body}" "${joc_url}"/joc/api/orders/history -o "${order_history_file}"
+
+    if [ "${verbose}" -gt 0 ]
+    then
+        LogVerbose ".... response:"
+        >&2 head -c "${verbose_chars}" "${order_history_file}"
+        >&2 echo " ..."
+    fi
+
+    if <"${order_history_file}" jq -e . >/dev/null 2>&1
+    then
+        ok=$(<"${order_history_file}" jq -r '.history // empty' | sed 's/^"//' | sed 's/"$//')
+        if [ -z "${ok}" ]
+        then
+            error_code=$(<"${order_history_file}" jq -r '.error.code // empty' | sed 's/^"//' | sed 's/"$//')
+            if [ "${error_code}" = "JOC-400" ]
+            then
+                LogWarning "Report_Order_History() could not perform operation:"
+                >&2 head -c "${verbose_chars}" "${order_history_file}"
+                >&2 echo " ..."
+                exit 3
+            else
+                LogError "Report_Order_History() failed:"
+                >&2 head -c "${verbose_chars}" "${order_history_file}"
+                >&2 echo " ..."
+                exit 4
+            fi
+        fi
+    else
+        LogError "Report_Order_History() failed:"
+        >&2 head -c "${verbose_chars}" "${order_history_file}"
+        >&2 echo " ..."
+        exit 4
+    fi
+
+    if [ "${csv}" -eq 1 ]
+    then
+        # credits to https://stackoverflow.com/questions/57242240/jq-object-cannot-be-csv-formatted-only-array
+        json_module=/tmp/json2csv.jq
+        echo '
+def json2headers:
+  def isscalar: type | . != "array" and . != "object";
+  def isflat: all(.[]; isscalar);
+  paths as $p
+  | getpath($p)
+  | if type == "array" and isflat then $p
+     elif isscalar and (($p[-1]|type) == "string") then $p
+     else empty end ;
+
+def json2array($header):
+  def value($p):
+    try getpath($p) catch null
+    | if type == "object" then null else . end;
+  [$header[] as $p | value($p)];
+
+def json2csv:
+  ( [.[] | json2headers] | unique) as $h
+  | ([$h[]|join("_") ],
+     (.[]
+      | json2array($h)
+      | map( if type == "array" then map(tostring)|join("|") else tostring end)))
+  | @csv ;        
+' > "${json_module}"
+        <"${order_history_file}" jq -r -L /tmp 'include "json2csv"; del(.history[].arguments) | .history | json2csv // empty'
+    else
+        <"${order_history_file}" jq -r '.history // empty'
+    fi
+}
+
+Report_Task_History()
+{
+    LogVerbose ".. Report_Task_History()"
+    Curl_Options
+
+    request_body="{ \"controllerId\": \"${controller_id}\"" 
+
+    if [ -n "${date_from}" ]
+    then
+        [[ "$date_from" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[1-2][0-9]|3[0-1]) ]] && date_from=$(date --date "${date_from}" +'%Y-%m-%dT%H:%M:%S')
+        request_body="${request_body}, \"dateFrom\": \"${date_from}\"" 
+    fi
+
+    if [ -n "${date_to}" ]
+    then
+        [[ "$date_to" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[1-2][0-9]|3[0-1]) ]] && date_to=$(date --date "${date_to}" +'%Y-%m-%dT%H:%M:%S')
+        request_body="${request_body}, \"dateTo\": \"$(date --date "${date_to}" +'%Y-%m-%dT%H:%M:%S')\"" 
+    fi
+
+    if [ -n "${date_from_completed}" ]
+    then
+        [[ "$date_from_completed" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[1-2][0-9]|3[0-1]) ]] && date_from_completed=$(date --date "${date_from_completed}" +'%Y-%m-%dT%H:%M:%S')
+        request_body="${request_body}, \"completedDateFrom\": \"$(date --date "${date_from_completed}" +'%Y-%m-%dT%H:%M:%S')\"" 
+    fi
+
+    if [ -n "${date_to_completed}" ]
+    then
+        [[ "$date_to_completed" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[1-2][0-9]|3[0-1]) ]] && date_to_completed=$(date --date "${date_to_completed}" +'%Y-%m-%dT%H:%M:%S')
+        request_body="${request_body}, \"completedDateTo\": \"$(date --date "${date_to_completed}" +'%Y-%m-%dT%H:%M:%S')\"" 
+    fi
+
+    if [ -n "${time_zone}" ]
+    then
+        request_body="${request_body}, \"timeZone\": \"${time_zone}\""
+    fi
+
+    if [ -n "${job}" ]
+    then
+        request_body="${request_body}, \"jobName\": \"${job}\"" 
+    fi
+
+    if [ -n "${workflow}" ]
+    then
+        request_body="${request_body}, \"workflowName\": \"${workflow}\""
+    fi
+
+    if [ -n "${folder}" ]
+    then
+        request_body="${request_body}, \"folders\": ["
+        comma=
+        set -- "$(echo "${folder}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} { \"folder\": \"${i}\", \"recursive\": ${recursive} }"
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${tag}" ]
+    then
+        request_body="${request_body}, \"workflowTags\": ["
+        comma=
+        set -- "$(echo "${tag}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${order_tag}" ]
+    then
+        request_body="${request_body}, \"orderTags\": ["
+        comma=
+        set -- "$(echo "${order_tag}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${state}" ]
+    then
+        request_body="${request_body}, \"historyStates\": ["
+        comma=
+        set -- "$(echo "${state}" | tr '[:lower:]' '[:upper:]' | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${criticality}" ]
+    then
+        request_body="${request_body}, \"criticalities\": ["
+        comma=
+        set -- "$(echo "${criticality}" | tr '[:lower:]' '[:upper:]' | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ "${limit}" -ne 0 ]
+    then
+        request_body="${request_body}, \"limit\": ${limit}"
+    fi
+
+    Audit_Log_Request
+    request_body="${request_body} }"
+
+    GetTempDirectory
+    task_history_file="${tmp_dir}/task-history.json"
+
+    LogVerbose ".... request:"
+    LogVerbose "curl ${curl_log_options[*]} -H \"X-Access-Token: ${access_token}\" -H \"Accept: application/json\" -H \"Content-Type: application/json\" -d ${request_body} ${joc_url}/joc/api/tasks/history -o ${task_history_file}"
+
+    curl "${curl_options[@]}" -H "X-Access-Token: ${access_token}" -H "Accept: application/json" -H "Content-Type: application/json" -d "${request_body}" "${joc_url}"/joc/api/tasks/history -o "${task_history_file}"  
+
+    if [ "${verbose}" -gt 0 ]
+    then
+        LogVerbose ".... response:"
+        >&2 head -c "${verbose_chars}" "${task_history_file}"
+        >&2 echo " ..."
+    fi
+
+    if <"${task_history_file}" jq -e . >/dev/null 2>&1
+    then
+        ok=$(<"${task_history_file}" jq -r '.history // empty' | sed 's/^"//' | sed 's/"$//')
+        if [ -z "${ok}" ]
+        then
+            error_code=$(<"${task_history_file}" jq -r '.error.code // empty' | sed 's/^"//' | sed 's/"$//')
+            if [ "${error_code}" = "JOC-400" ]
+            then
+                LogWarning "Report_Task_History() could not perform operation:"
+                >&2 head -c "${verbose_chars}" "${task_history_file}"
+                >&2 echo " ..."
+                exit 3
+            else
+                LogError "Report_Task_History() failed:"
+                >&2 head -c "${verbose_chars}" "${task_history_file}"
+                >&2 echo " ..."
+                exit 4
+            fi
+        fi
+    else
+        LogError "Report_Task_History() failed:"
+        >&2 head -c "${verbose_chars}" "${task_history_file}"
+        >&2 echo " ..."
+        exit 4
+    fi
+
+    if [ "${csv}" -eq 1 ]
+    then
+        # credits to https://stackoverflow.com/questions/57242240/jq-object-cannot-be-csv-formatted-only-array
+        json_module=/tmp/json2csv.jq
+        echo '
+def json2headers:
+  def isscalar: type | . != "array" and . != "object";
+  def isflat: all(.[]; isscalar);
+  paths as $p
+  | getpath($p)
+  | if type == "array" and isflat then $p
+     elif isscalar and (($p[-1]|type) == "string") then $p
+     else empty end ;
+
+def json2array($header):
+  def value($p):
+    try getpath($p) catch null
+    | if type == "object" then null else . end;
+  [$header[] as $p | value($p)];
+
+def json2csv:
+  ( [.[] | json2headers] | unique) as $h
+  | ([$h[]|join("_") ],
+     (.[]
+      | json2array($h)
+      | map( if type == "array" then map(tostring)|join("|") else tostring end)))
+  | @csv ;        
+' > "${json_module}"
+        <"${task_history_file}" jq -r -L /tmp 'include "json2csv"; del(.history[].arguments) | .history | json2csv // empty'
+    else
+        <"${task_history_file}" jq -r '.history // empty'
+    fi
+}
+
+Report_Transfer_History()
+{
+    LogVerbose ".. Report_Transfer_History()"
+    Curl_Options
+
+    request_body="{ \"controllerId\": \"${controller_id}\"" 
+
+    if [ -n "${date_from}" ]
+    then
+        [[ "$date_from" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[1-2][0-9]|3[0-1]) ]] && date_from=$(date --date "${date_from}" +'%Y-%m-%dT%H:%M:%S')
+        request_body="${request_body}, \"dateFrom\": \"${date_from}\"" 
+    fi
+
+    if [ -n "${date_to}" ]
+    then
+        [[ "$date_to" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[1-2][0-9]|3[0-1]) ]] && date_to=$(date --date "${date_to}" +'%Y-%m-%dT%H:%M:%S')
+        request_body="${request_body}, \"dateTo\": \"${date_to}\"" 
+    fi
+
+    if [ -n "${time_zone}" ]
+    then
+        request_body="${request_body}, \"timeZone\": \"${time_zone}\"" 
+    fi
+
+    if [ -n "${state}" ]
+    then
+        request_body="${request_body}, \"states\": ["
+        comma=
+        set -- "$(echo "${state}" | tr '[:lower:]' '[:upper:]' | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${operation}" ]
+    then
+        request_body="${request_body}, \"operations\": ["
+        comma=
+        set -- "$(echo "${operation}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${source_host}" ] || [ -n "${source_protocol}" ]
+    then
+        request_body="${request_body}, \"sources\": ["
+        comma=
+        set -- "$(echo "${source_protocol}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} {"
+            if [ -n "${source_host}" ]
+            then
+                request_body="${request_body}${comma} \"host\": \"${source_host}\","
+            fi
+            request_body="${request_body} \"protocol\": \"${i}\" }"
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${source_file}" ]
+    then
+        request_body="${request_body}, \"sourceFiles\": ["
+        comma=
+        set -- "$(echo "${source_file}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${target_host}" ] || [ -n "${target_protocol}" ]
+    then
+        request_body="${request_body}, \"targets\": ["
+        comma=
+        set -- "$(echo "${target_protocol}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} {"
+            if [ -n "${target_host}" ]
+            then
+                request_body="${request_body}${comma} \"host\": \"${target_host}\","
+            fi
+            request_body="${request_body} \"protocol\": \"${i}\" }"
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${target_file}" ]
+    then
+        request_body="${request_body}, \"targetFiles\": ["
+        comma=
+        set -- "$(echo "${target_file}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${profile}" ]
+    then
+        request_body="${request_body}, \"profiles\": ["
+        comma=
+        set -- "$(echo "${profile}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${workflow}" ]
+    then
+        request_body="${request_body}, \"workflowNames\": ["
+        comma=
+        set -- "$(echo "${workflow}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ "${limit}" -ne 0 ]
+    then
+        request_body="${request_body}, \"limit\": ${limit}" 
+    fi
+
+    if [ "${min_files}" -gt 0 ]
+    then
+        request_body="${request_body}, \"numOfFilesFrom\": ${min_files}" 
+    fi
+
+    if [ "${max_files}" -gt 0 ]
+    then
+        request_body="${request_body}, \"numOfFilesTo\": ${max_files}" 
+    fi
+
+    Audit_Log_Request
+    request_body="${request_body} }"
+
+    GetTempDirectory
+    transfer_history_file="${tmp_dir}"/transfer-history.json
+
+    LogVerbose ".... request:"
+    LogVerbose "curl ${curl_log_options[*]} -H \"X-Access-Token: ${access_token}\" -H \"Accept: application/json\" -H \"Content-Type: application/json\" -d ${request_body} ${joc_url}/joc/api/yade/transfers -o ${transfer_history_file}"
+
+    curl "${curl_options[@]}" -H "X-Access-Token: ${access_token}" -H "Accept: application/json" -H "Content-Type: application/json" -d "${request_body}" "${joc_url}"/joc/api/yade/transfers -o "${transfer_history_file}"
+
+    if [ "${verbose}" -gt 0 ]
+    then
+        LogVerbose ".... response:"
+        >&2 head -c "${verbose_chars}" "${transfer_history_file}"                       
+        >&2 echo " ..."
+    fi
+
+    if <"${transfer_history_file}" jq -e . >/dev/null 2>&1
+    then
+        ok=$(<"${transfer_history_file}" jq -r '.transfers | length // empty' | sed 's/^"//' | sed 's/"$//')
+        if [ -n "${ok}" ] && [ "${ok}" -eq 0 ]
+        then
+            LogWarning "Report_Transfer_History() could not find history records"
+            exit 3
+        fi
+
+        if [ -z "${ok}" ]
+        then
+            error_code=$(<"${transfer_history_file}" jq -r '.error.code // empty' | sed 's/^"//' | sed 's/"$//')
+            if [ "${error_code}" = "JOC-400" ]
+            then
+                LogWarning "Report_Transfer_History() could not perform operation:"
+                >&2 head -c "${verbose_chars}" "${transfer_history_file}"                
+                >&2 echo " ..."
+                exit 3
+            else
+                LogError "Report_Transfer_History() failed:"
+                >&2 head -c "${verbose_chars}" "${transfer_history_file}"                
+                >&2 echo " ..."
+                exit 4
+            fi
+        fi
+    else
+        LogError "Report_Transfer_History() failed:"
+        >&2 head -c "${verbose_chars}" "${transfer_history_file}"                
+        >&2 echo " ..."
+        exit 4
+    fi
+
+    if [ "${include_files}" -eq 0 ]
+    then
+        if [ "${csv}" -eq 1 ]
+        then
+            # credits to https://stackoverflow.com/questions/57242240/jq-object-cannot-be-csv-formatted-only-array
+            json_module=/tmp/json2csv.jq
+            echo '
+def json2headers:
+  def isscalar: type | . != "array" and . != "object";
+  def isflat: all(.[]; isscalar);
+  paths as $p
+  | getpath($p)
+  | if type == "array" and isflat then $p
+     elif isscalar and (($p[-1]|type) == "string") then $p
+     else empty end ;
+
+def json2array($header):
+  def value($p):
+    try getpath($p) catch null
+    | if type == "object" then null else . end;
+  [$header[] as $p | value($p)];
+
+def json2csv:
+  ( [.[] | json2headers] | unique) as $h
+  | ([$h[]|join("_") ],
+     (.[]
+      | json2array($h)
+      | map( if type == "array" then map(tostring)|join("|") else tostring end)))
+  | @csv ;        
+' > "${json_module}"
+            <"${transfer_history_file}" jq -r -L /tmp 'include "json2csv"; .transfers | json2csv // empty'
+        else
+            <"${transfer_history_file}" jq -r '.transfers // empty'
+        fi
+    fi
+}
+
+Report_Transfer_File()
+{
+    LogVerbose ".. Report_Transfer_File()"
+    Curl_Options
+
+    request_body="{ \"transferIds\": $(<"${transfer_history_file}" jq -r -c '[.transfers[].id] // empty')" 
+
+    if [ "${limit}" -ne 0 ]
+    then
+        request_body="${request_body}, \"limit\": ${limit}" 
+    fi
+
+    Audit_Log_Request
+    request_body="${request_body} }"
+
+    GetTempDirectory
+    transfer_items_file="${tmp_dir}"/transfer-files.json
+
+    LogVerbose ".... request:"
+    LogVerbose "curl ${curl_log_options[*]} -H \"X-Access-Token: ${access_token}\" -H \"Accept: application/json\" -H \"Content-Type: application/json\" -d ${request_body} ${joc_url}/joc/api/yade/files -o ${transfer_items_file}"
+
+    curl "${curl_options[@]}" -H "X-Access-Token: ${access_token}" -H "Accept: application/json" -H "Content-Type: application/json" -d "${request_body}" "${joc_url}"/joc/api/yade/files -o "${transfer_items_file}"
+
+    if [ "${verbose}" -gt 0 ]
+    then
+        LogVerbose ".... response:"
+        >&2 head -c "${verbose_chars}" "${transfer_items_file}"
+        >&2 echo " ..."
+    fi
+
+    if <"${transfer_items_file}" jq -e . >/dev/null 2>&1
+    then
+        ok=$(<"${transfer_items_file}" jq -r '.files | length // empty' | sed 's/^"//' | sed 's/"$//')
+        if [ -n "${ok}" ] && [ "${ok}" -eq 0 ]
+        then
+            LogWarning "Report_Transfer_File() could not find records"
+            exit 3
+        fi
+
+        if [ -z "${ok}" ]
+        then
+            error_code=$(<"${transfer_items_file}" jq -r '.error.code // empty' | sed 's/^"//' | sed 's/"$//')
+            if [ "${error_code}" = "JOC-400" ]
+            then
+                LogWarning "Report_Transfer_File() could not perform operation:"
+                >&2 head -c "${verbose_chars}" "${transfer_items_file}"
+                >&2 echo " ..."
+                exit 3
+            else
+                LogError "Report_Transfer_File() failed:"
+                >&2 head -c "${verbose_chars}" "${transfer_items_file}"
+                >&2 echo " ..."
+                exit 4
+            fi
+        fi
+    else
+        LogError "Report_Transfer_File() failed:"
+        >&2 head -c "${verbose_chars}" "${transfer_items_file}"
+        >&2 echo " ..."
+        exit 4
+    fi
+
+    if [ "${csv}" -eq 1 ]
+    then
+        # credits to https://stackoverflow.com/questions/57242240/jq-object-cannot-be-csv-formatted-only-array
+        json_module=/tmp/json2csv.jq
+        echo '
+def json2headers:
+  def isscalar: type | . != "array" and . != "object";
+  def isflat: all(.[]; isscalar);
+  paths as $p
+  | getpath($p)
+  | if type == "array" and isflat then $p
+     elif isscalar and (($p[-1]|type) == "string") then $p
+     else empty end ;
+
+def json2array($header):
+  def value($p):
+    try getpath($p) catch null
+    | if type == "object" then null else . end;
+  [$header[] as $p | value($p)];
+
+def json2csv:
+  ( [.[] | json2headers] | unique) as $h
+  | ([$h[]|join("_") ],
+     (.[]
+      | json2array($h)
+      | map( if type == "array" then map(tostring)|join("|") else tostring end)))
+  | @csv ;        
+' > "${json_module}"
+        jq --slurpfile files "${transfer_items_file}" 'INDEX($files[].files[]; .transferId | tostring) as $dict | .transfers | map(. + $dict[.id | tostring])' "${transfer_history_file}" | jq -r -L /tmp 'include "json2csv"; . | json2csv // empty'
+    else
+        jq --slurpfile files "${transfer_items_file}" 'INDEX($files[].files[]; .transferId | tostring) as $dict | .transfers | map(. + $dict[.id | tostring])' "${transfer_history_file}"
+    fi
+}
+
 Encrypt()
 {
     in_string="$1"
@@ -1258,58 +2248,104 @@ Usage()
     >&"$1" echo "Usage: $(basename "$0") [Command] [Options] [Switches]"
     >&"$1" echo ""
     >&"$1" echo "  Commands:"
-    >&"$1" echo "    status              --controller-id"
-    >&"$1" echo "    status-agent        --controller-id  [--agent-id] [--agent-state] [--agent-cluster] [--no-hidden]"
-    >&"$1" echo "    health-check        --controller-id  [--agent-id] [--agent-state] [--agent-cluster] [--no-hidden] [--whatif-shutdown]"
-    >&"$1" echo "    version            [--controller-id] [--agent-id] [--json]"
-    >&"$1" echo "    switch-over         --controller-id"
-    >&"$1" echo "    restart-service     --service-type"
-    >&"$1" echo "    run-service         --service-type"
-    >&"$1" echo "    check-license      [--validity-days]"
+    >&"$1" echo "    status                   --controller-id"
+    >&"$1" echo "    status-agent             --controller-id  [--agent-id] [--agent-state] [--agent-cluster] [--no-hidden]"
+    >&"$1" echo "    health-check             --controller-id  [--agent-id] [--agent-state] [--agent-cluster] [--no-hidden] [--whatif-shutdown]"
+    >&"$1" echo "    version                 [--controller-id] [--agent-id] [--json]"
+    >&"$1" echo "    switch-over              --controller-id"
+    >&"$1" echo "    restart-service         [--service-type]  [--proxies]"
+    >&"$1" echo "    run-service              --service-type"
+    >&"$1" echo "    check-license           [--validity-days]"
     >&"$1" echo "    get-settings"
-    >&"$1" echo "    store-settings      --settings"
-    >&"$1" echo "    encrypt             --in [--infile --outfile] --cert [--java-home] [--java-lib]"
-    >&"$1" echo "    decrypt             --in [--infile --outfile] --key [--key-password] [--java-home] [--java-lib]"
+    >&"$1" echo "    store-settings           --settings"
+    >&"$1" echo "    report-*                [--controller-id] [--workflow] [--folder] [--recursive] [--state]"
+    >&"$1" echo "                            [--date-from] [--date-to]  [--tag] [--order-tag] [--csv]"
+    >&"$1" echo "    report-daily-plan       [--order-id] [--schedule] [--schedule-folder] [--late]"
+    >&"$1" echo "    report-order-history    [--order-id] [--time-zone]"
+    >&"$1" echo "                            [--date-from-completed] [--date-to-completed] [--limit]"
+    >&"$1" echo "    report-task-history     [--job]      [--time-zone] [--criticality]"
+    >&"$1" echo "                            [--date-from-completed] [--date-to-completed] [--limit] "
+    >&"$1" echo "    report-transfer-history [--profile]  [--time-zone] [--operation] [--min-files] [--max-files]"
+    >&"$1" echo "                            [--source-host] [--source-protocol] [--source-file] [--files]"
+    >&"$1" echo "                            [--target-host] [--target-protocol] [--target-file] [--limit]"
+    >&"$1" echo "    encrypt                  --in [--infile --outfile] --cert [--java-home] [--java-lib]"
+    >&"$1" echo "    decrypt                  --in [--infile --outfile] --key [--key-password] [--java-home] [--java-lib]"
     >&"$1" echo ""
     >&"$1" echo "  Options:"
-    >&"$1" echo "    --url=<url>                        | required: JOC Cockpit URL"
-    >&"$1" echo "    --user=<account>                   | required: JOC Cockpit user account"
-    >&"$1" echo "    --password=<password>              | optional: JOC Cockpit password"
-    >&"$1" echo "    --ca-cert=<path>                   | optional: path to CA Certificate used for JOC Cockpit login"
-    >&"$1" echo "    --client-cert=<path>               | optional: path to Client Certificate used for login"
-    >&"$1" echo "    --client-key=<path>                | optional: path to Client Key used for login"
-    >&"$1" echo "    --timeout=<seconds>                | optional: timeout for request, default: ${timeout}"
-    >&"$1" echo "    --controller-id=<id>               | optional: Controller ID"
-    >&"$1" echo "    --agent-id=<id[,id]>               | optional: Agent ID"
-    >&"$1" echo "    --agent-state=<state[,state]>      | optional: Agent state filters such as"
-    >&"$1" echo "                                                   COUPLED, RESETTING, RESET, INITIALISED, COUPLINGFAILED, SHUTDOWN"
-    >&"$1" echo "    --service-type=<identifier>        | optional: service for restart such as cluster, history, dailyplan, cleanup, monitor"
-    >&"$1" echo "    --validity-days=<number>           | optional: number of days for validity of license, default: ${validity_days}"
-    >&"$1" echo "    --settings=<json>                  | optional: settings to be stored from JSON"
-    >&"$1" echo "    --whatif-shutdown=<host[,host]>    | optional: health status if hosts will be shutdown"
-    >&"$1" echo "    --key=<path>                       | optional: path to private key file in PEM format"
-    >&"$1" echo "    --key-password=<password>          | optional: password for private key file"
-    >&"$1" echo "    --cert=<path>                      | optional: path to certificate file in PEM format"
-    >&"$1" echo "    --in=<string>                      | optional: input string for encryption/decryption"
-    >&"$1" echo "    --infile=<path>                    | optional: input file for encryption/decryption"
-    >&"$1" echo "    --outfile=<path>                   | optional: output file for encryption/decryption"
-    >&"$1" echo "    --java-home=<directory>            | optional: Java Home directory for encryption/decryption, default: ${JAVA_HOME}"
-    >&"$1" echo "    --java-lib=<directory>             | optional: Java library directory for encryption/decryption, default: ${java_lib}"
-    >&"$1" echo "    --audit-message=<string>           | optional: audit log message"
-    >&"$1" echo "    --audit-time-spent=<number>        | optional: audit log time spent in minutes"
-    >&"$1" echo "    --audit-link=<url>                 | optional: audit log link"
-    >&"$1" echo "    --log-dir=<directory>              | optional: path to directory holding the script's log files"
+    >&"$1" echo "    --url=<url>                         | required: JOC Cockpit URL"
+    >&"$1" echo "    --user=<account>                    | required: JOC Cockpit user account"
+    >&"$1" echo "    --password=<password>               | optional: JOC Cockpit password"
+    >&"$1" echo "    --ca-cert=<path>                    | optional: path to CA Certificate used for JOC Cockpit login"
+    >&"$1" echo "    --client-cert=<path>                | optional: path to Client Certificate used for login"
+    >&"$1" echo "    --client-key=<path>                 | optional: path to Client Key used for login"
+    >&"$1" echo "    --timeout=<seconds>                 | optional: timeout for request, default: ${timeout}"
+    >&"$1" echo "    --controller-id=<id>                | optional: Controller ID"
+    >&"$1" echo "    --agent-id=<id[,id]>                | optional: Agent ID"
+    >&"$1" echo "    --agent-state=<state[,state]>       | optional: Agent state filters such as"
+    >&"$1" echo "                                                    COUPLED, RESETTING, RESET, INITIALISED, COUPLINGFAILED, SHUTDOWN"
+    >&"$1" echo "    --service-type=<identifier>         | optional: service for restart such as cluster, history, dailyplan, cleanup, monitor"
+    >&"$1" echo "    --validity-days=<number>            | optional: number of days for validity of license, default: ${validity_days}"
+    >&"$1" echo "    --settings=<json>                   | optional: settings to be stored from JSON"
+    >&"$1" echo "    --whatif-shutdown=<host[,host]>     | optional: health status if hosts will be shutdown"
+    >&"$1" echo "    --order-id=<id[,id]>                | optional: list of Order IDs"
+    >&"$1" echo "    --order-tag=<name[,name]>           | optional: list of order tags"
+    >&"$1" echo "    --workflow=<name[,name]>            | optional: list of workflow names"
+    >&"$1" echo "    --folder=<path[,path]>              | optional: list of workflow folder paths"
+    >&"$1" echo "    --schedule=<name[,name]>            | optional: list of schedule names"
+    >&"$1" echo "    --schedule-folder=<path[,path]>     | optional: list of schedule folder paths"
+    >&"$1" echo "    --tag=<name[,name]>                 | optional: list of workflow tags"
+    >&"$1" echo "    --limit=<number>                    | optional: limit the number of orders returned"
+    >&"$1" echo "    --job=<name>                        | optional: job name"
+    >&"$1" echo "    --criticality=<name[,name]>         | optional: job criticality: minor, normal, major, critical"
+    >&"$1" echo "    --date-from=<date>                  | optional: date from which to select orders"
+    >&"$1" echo "    --date-to=<date>                    | optional: date until which to select orders"
+    >&"$1" echo "    --date-from-completed=<date>        | optional: earliest order completion date"
+    >&"$1" echo "    --date-to-completed=<date>          | optional: latest order completion date"
+    >&"$1" echo "    --time-zone=<identifier>            | optional: time zone for date specification"
+    >&"$1" echo "    --state=<state[,state]>             | optional: order state for history commands"
+    >&"$1" echo "                                            report-daily-plan:    PLANNED, SUBMITTED, FINISHED"
+    >&"$1" echo "                                            report-*: SUCCESSFUL, FAILED, INCOMPLETE"
+    >&"$1" echo "    --operation=<operation[,operation]> | optional: file transfer operation: COPY, MOVE, GETLIST, REMOVE"
+    >&"$1" echo "    --profile=<profile[,profile]>       | optional: file transfer profile"
+    >&"$1" echo "    --source-host=<hostname>            | optional: name of source host in file transfer"
+    >&"$1" echo "    --source-protocol=<prot[,prot]>     | optional: protocol for source host in file transfer:"
+    >&"$1" echo "                                                    LOCAL, FTP, FTPS, SFTP, HTTP, HTTPS, WEBDAV, WEBDAVS, SMB"
+    >&"$1" echo "    --source-file=<path[,path]>         | optional: path to source file in file transfer"
+    >&"$1" echo "    --target-host=<hostname>            | optional: name of target host in file transfer"
+    >&"$1" echo "    --target-protocol=<prot[,prot]>     | optional: protocol for target host in file transfer:"
+    >&"$1" echo "                                                    LOCAL, FTP, FTPS, SFTP, HTTP, HTTPS, WEBDAV, WEBDAVS, SMB"
+    >&"$1" echo "    --target-file=<path[,path]>         | optional: path to target file in file transfer"
+    >&"$1" echo "    --min-files=<number>                | optional: min. number of files in file transfer"
+    >&"$1" echo "    --max-files=<number>                | optional: max. number of files in file transfer"
+    >&"$1" echo "    --key=<path>                        | optional: path to private key file in PEM format"
+    >&"$1" echo "    --key-password=<password>           | optional: password for private key file"
+    >&"$1" echo "    --cert=<path>                       | optional: path to certificate file in PEM format"
+    >&"$1" echo "    --in=<string>                       | optional: input string for encryption/decryption"
+    >&"$1" echo "    --infile=<path>                     | optional: input file for encryption/decryption"
+    >&"$1" echo "    --outfile=<path>                    | optional: output file for encryption/decryption"
+    >&"$1" echo "    --java-home=<directory>             | optional: Java Home directory for encryption/decryption, default: ${JAVA_HOME}"
+    >&"$1" echo "    --java-lib=<directory>              | optional: Java library directory for encryption/decryption, default: ${java_lib}"
+    >&"$1" echo "    --audit-message=<string>            | optional: audit log message"
+    >&"$1" echo "    --audit-time-spent=<number>         | optional: audit log time spent in minutes"
+    >&"$1" echo "    --audit-link=<url>                  | optional: audit log link"
+    >&"$1" echo "    --log-dir=<directory>               | optional: path to directory holding the script's log files"
+    >&"$1" echo "    --verbose-chars=<number>            | optional: number of characters per verbose log output"
     >&"$1" echo ""
     >&"$1" echo "  Switches:"
-    >&"$1" echo "    -h | --help                        | displays usage"
-    >&"$1" echo "    -v | --verbose                     | displays verbose output, repeat to increase verbosity"
-    >&"$1" echo "    -p | --password                    | asks for password"
-    >&"$1" echo "    -k | --key-password                | asks for key password"
-    >&"$1" echo "    -j | --json                        | returns version information in JSON format"
-    >&"$1" echo "    --agent-cluster                    | filters non-clustered Agents"
-    >&"$1" echo "    --no-hidden                        | filters hidden Agents"
-    >&"$1" echo "    --show-logs                        | shows log output if --log-dir is used"
-    >&"$1" echo "    --make-dirs                        | creates directories if they do not exist"
+    >&"$1" echo "    -h | --help                         | displays usage"
+    >&"$1" echo "    -v | --verbose                      | displays verbose output, repeat to increase verbosity"
+    >&"$1" echo "    -p | --password                     | asks for password"
+    >&"$1" echo "    -k | --key-password                 | asks for key password"
+    >&"$1" echo "    -x | --proxies                      | specifies proxy services for restart"
+    >&"$1" echo "    -c | --csv                          | converts JSON output of history commands to CSV"
+    >&"$1" echo "    -j | --json                         | returns version information in JSON format"
+    >&"$1" echo "    -l | --late                         | includes late orders"
+    >&"$1" echo "    -r | --recursive                    | includes sub-folders recursively"
+    >&"$1" echo "    --files                             | adds files to File Transfer History output"
+    >&"$1" echo "    --agent-cluster                     | filters non-clustered Agents"
+    >&"$1" echo "    --no-hidden                         | filters hidden Agents"
+    >&"$1" echo "    --show-logs                         | shows log output if --log-dir is used"
+    >&"$1" echo "    --make-dirs                         | creates directories if they do not exist"
     >&"$1" echo ""
     >&"$1" echo "see https://kb.sos-berlin.com/x/QoiOCQ"
     >&"$1" echo ""
@@ -1326,7 +2362,7 @@ Arguments()
     fi
 
     case "$1" in
-        status|status-agent|health-check|switch-over|restart-service|run-service|get-settings|store-settings|check-license|version|encrypt|decrypt) action=$1
+        status|status-agent|health-check|switch-over|restart-service|run-service|get-settings|store-settings|check-license|version|report-daily-plan|report-order-history|report-task-history|report-transfer-history|encrypt|decrypt) action=$1
                                     ;;
         -h|--help)                  Usage 1
                                     exit
@@ -1368,6 +2404,58 @@ Arguments()
                                     ;;
             --whatif-shutdown=*)    whatif_shutdown=$(echo "${option}" | sed 's/--whatif-shutdown=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
                                     ;;
+            --order-id=*)           order_id=$(echo "${option}" | sed 's/--order-id=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --order-tag=*)          order_tag=$(echo "${option}" | sed 's/--order-tag=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --workflow=*)           workflow=$(echo "${option}" | sed 's/--workflow=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --folder=*)             folder=$(echo "${option}" | sed 's/--folder=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --schedule=*)           schedule=$(echo "${option}" | sed 's/--schedule=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --schedule-folder=*)    schedule_folder=$(echo "${option}" | sed 's/--schedule-folder=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --tag=*)                tag=$(echo "${option}" | sed 's/--tag=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --limit=*)              limit=$(echo "${option}" | sed 's/--limit=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --job=*)                job=$(echo "${option}" | sed 's/--job=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --criticality=*)        criticality=$(echo "${option}" | sed 's/--criticality=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --date-from=*)          date_from=$(echo "${option}" | sed 's/--date-from=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --date-to=*)            date_to=$(echo "${option}" | sed 's/--date-to=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --date-from-completed=*)    date_from_completed=$(echo "${option}" | sed 's/--date-from-completed=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --date-to-completed=*)  date_to_completed=$(echo "${option}" | sed 's/--date-to-completed=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --time-zone=*)          time_zone=$(echo "${option}" | sed 's/--time-zone=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --state=*)              state=$(echo "${option}" | sed 's/--state=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --operation=*)          operation=$(echo "${option}" | sed 's/--operation=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --profile=*)            profile=$(echo "${option}" | sed 's/--profile=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --source-host=*)        source_host=$(echo "${option}" | sed 's/--source-host=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --source-protocol=*)    source_protocol=$(echo "${option}" | sed 's/--source-protocol=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --source-file=*)        source_file=$(echo "${option}" | sed 's/--source-file=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --target-host=*)        target_host=$(echo "${option}" | sed 's/--target-host=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --target-protocol=*)    target_protocol=$(echo "${option}" | sed 's/--target-protocol=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --target-file=*)        target_file=$(echo "${option}" | sed 's/--target-file=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --min-files=*)          min_files=$(echo "${option}" | sed 's/--min-files=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --max-files=*)          max_files=$(echo "${option}" | sed 's/--max-files=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
             --key=*)                key_file=$(echo "${option}" | sed 's/--key=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
                                     ;;
             --cert=*)               cert_file=$(echo "${option}" | sed 's/--cert=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
@@ -1392,6 +2480,8 @@ Arguments()
                                     ;;
             --log-dir=*)            log_dir=$(echo "${option}" | sed 's/--log-dir=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
                                     ;;
+            --verbose-chars=*)      verbose_chars=$(echo "${option}" | sed 's/--verbose-chars=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
             # Switches
             -h|--help)              Usage 1
                                     exit
@@ -1402,7 +2492,17 @@ Arguments()
                                     ;;
             -k|--key-password)      AskKeyPassword
                                     ;;
+            -x|--proxies)           proxies=1
+                                    ;;
+            -c|--csv)               csv=1
+                                    ;;
             -l|--json)              json=1
+                                    ;;
+            -l|--late)              late=true
+                                    ;;
+            -r|--recursive)         recursive=true
+                                    ;;
+            --files)                include_files=1
                                     ;;
             --agent-cluster)        agent_cluster=1
                                     ;;
@@ -1412,7 +2512,7 @@ Arguments()
                                     ;;
             --show-logs)            show_logs=1
                                     ;;
-            status|status-agent|health-check|switch-over|restart-service|run-service|get-settings|store-settings|check-license|version|encrypt|decrypt) action=$1
+            status|status-agent|health-check|switch-over|restart-service|run-service|get-settings|store-settings|check-license|version|report-daily-plan|report-order-history|report-task-history|report-transfer-history|encrypt|decrypt) action=$1
                                     ;;
             *)                      Usage 2
                                     >&2 echo "unknown option: ${option}"
@@ -1444,10 +2544,10 @@ Arguments()
             exit 1
         fi
     
-        if [ -z "${joc_user}" ]
+        if [ -z "${joc_user}" ] && [ -z "${joc_client_key}" ]
         then
             Usage 2
-            LogError "JOC Cockpit user account not specified: --user=<account>"
+            LogError "No JOC Cockpit client authentication certificate and no user account specified: --user=<account>"
             exit 1
         fi
     
@@ -1481,7 +2581,24 @@ Arguments()
         exit 1
     fi
 
-    actions="|restart-service|run-service|"
+    if [ "${action}" = "restart-service" ]
+    then
+        if [ -z "${service_type}" ] && [ "${proxies}" -eq 0 ]
+        then
+            Usage 2
+            LogError "Action '${action}' requires to specify the service type or proxies: --service-type=cluster|history|dailyplan|cleanup|monitor or --proxies"
+            exit 1
+        fi
+
+        if [ -n "${service_type}" ] && [ "${proxies}" -eq 1 ]
+        then
+            Usage 2
+            LogError "Action '${action}' requires to specify one of service type or proxies: --service-type=cluster|history|dailyplan|cleanup|monitor or --proxies"
+            exit 1
+        fi
+    fi
+
+    actions="|run-service|"
     if [[ "${actions}" == *"|${action}|"* ]] && [ -z "${service_type}" ]
     then
         Usage 2
@@ -1676,7 +2793,12 @@ Process()
                             ;;
         switch-over)        Switch_Over
                             ;;
-        restart-service)    Restart_Service
+        restart-service)    if [ "${proxies}" -eq 1 ]
+                            then
+                                Restart_Proxies
+                            else
+                                Restart_Service
+                            fi
                             ;;
         run-service)        Run_Service
                             ;;
@@ -1686,6 +2808,18 @@ Process()
                             ;;
         store-settings)     Store_Settings
                             ;;
+        report-daily-plan)        Report_Daily_Plan
+                                  ;;
+        report-order-history)     Report_Order_History
+                                  ;;
+        report-task-history)      Report_Task_History
+                                  ;;
+        report-transfer-history)  Report_Transfer_History
+                                  if [ "${include_files}" -gt 0 ]
+                                  then
+                                      Report_Transfer_File
+                                  fi
+                                  ;;
         version)            Version
                             ;;
         encrypt)            LogVerbose ".. Encrypt()"
@@ -1714,6 +2848,16 @@ End()
     if [ -n "${access_token}" ]
     then
         Logout
+    fi
+
+    if [ -n "${json_module}" ] && [ -f "${json_module}" ]
+    then
+        rm -f "${json_module}"
+    fi
+
+    if [ -n "${tmp_dir}" ] && [ -d "${tmp_dir}" ]
+    then
+        rm -fr "${tmp_dir}"
     fi
 
     if [ "$1" = "EXIT" ]
@@ -1756,12 +2900,34 @@ End()
     unset version
     unset agent_id
     unset settings
+    unset proxies
     unset json
+    unset csv
+    unset late
+    unset recursive
+
+    unset order_id
+    unset order_tag
+    unset workflow
+    unset folder
+    unset schedule
+    unset schedule_folder
+    unset tag
+    unset limit
+    unset job
+    unset criticality
+    unset date_from
+    unset date_to
+    unset date_from_completed
+    unset date_to_completed
+    unset time_zone
+    unset state
 
     unset agent_id
     unset agent_state
     unset agent_cluster
     unset no_hidden
+    unset include_files
 
     unset cert_file
     unset key_file
@@ -1784,6 +2950,8 @@ End()
     unset access_token
     unset curl_options
     unset action
+    
+    unset tmp_dir
 
     set +e
 }

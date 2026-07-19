@@ -59,6 +59,7 @@ end_position=
 variable=
 date_from=
 date_to=
+scheduled_date_to=
 time_zone=
 state=
 folder=
@@ -67,6 +68,9 @@ label=
 force=false
 reset=false
 deep=false
+compact=false
+regex=
+limit=10000
 notice_board=
 notice_id=
 notice_lifetime=
@@ -141,7 +145,7 @@ LogVerbose()
     
         if [ -z "${show_logs}" ]
         then
-            echo "$@"
+            >&2 echo "$@"
         fi
     fi
 }
@@ -313,6 +317,134 @@ Get_Timezone()
     fi
 }
 
+Get_Order()
+{
+    LogVerbose ".. Get_Order()"
+    Curl_Options
+
+    request_body="{ \"controllerId\": \"${controller_id}\""
+    
+    if [ -n "${order_id}" ]
+    then
+        request_body="${request_body}, \"orderIds\": ["
+        comma=
+        set -- "$(echo "${order_id}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${workflow}" ]
+    then
+        request_body="${request_body}, \"workflowIds\": ["
+        comma=
+        set -- "$(echo "${workflow}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} { \"path\": \"${i}\" }"
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${folder}" ]
+    then
+        request_body="${request_body}, \"folders\": ["
+        comma=
+        set -- "$(echo "${folder}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} {\"folder\": \"${i}\", \"recursive\": ${recursive}}"
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${compact}" ]
+    then
+        request_body="${request_body}, \"compact\": ${compact}"
+    fi
+
+    if [ -n "${regex}" ]
+    then
+        request_body="${request_body}, \"regex\": \"${regex}\""
+    fi
+
+    if [ -n "${state}" ]
+    then
+        request_body="${request_body}, \"states\": ["
+        comma=
+        set -- "$(echo "${state}" | sed -r 's/[,]+/ /g')"
+        for i in $@; do
+            request_body="${request_body}${comma} \"${i}\""
+            comma=,
+        done
+        request_body="${request_body} ]"
+    fi
+
+    if [ -n "${date_from}" ]
+    then
+        request_body="${request_body}, \"stateDateFrom\": \"${date_from}\""
+    fi
+
+    if [ -n "${date_to}" ]
+    then
+        request_body="${request_body}, \"stateDateTo\": \"${date_to}\""
+    fi
+
+    if [ -n "${scheduled_date_to}" ]
+    then
+        request_body="${request_body}, \"dateTo\": \"${scheduled_date_to}\""
+    fi
+
+    if [ -n "${time_zone}" ]
+    then
+        request_body="${request_body}, \"timeZone\": \"${time_zone}\""
+    fi
+
+    if [ -n "${limit}" ]
+    then
+        request_body="${request_body}, \"limit\": ${limit}"
+    fi
+
+    Audit_Log_Request
+    request_body="${request_body} }"
+
+    LogVerbose ".... request:"
+    LogVerbose "curl ${curl_log_options[*]} -H \"X-Access-Token: ${access_token}\" -H \"Accept: application/json\" -H \"Content-Type: application/json\" -d ${request_body} ${joc_url}/joc/api/orders"
+    response_json=$(curl "${curl_options[@]}" -H "X-Access-Token: ${access_token}" -H "Accept: application/json" -H "Content-Type: application/json" -d "${request_body}" "${joc_url}"/joc/api/orders)
+    LogVerbose ".... response:"
+    LogVerbose "${response_json}"
+
+    if echo "${response_json}" | jq -e . >/dev/null 2>&1
+    then
+        ok=$(echo "${response_json}" | jq -r '.orders[] // empty' | sed 's/^"//' | sed 's/"$//')
+        if [ -z "${ok}" ]
+        then
+            error_code=$(echo "${response_json}" | jq -r '.error.code // empty' | sed 's/^"//' | sed 's/"$//')
+            if [ "${error_code}" = "JOC-400" ]
+            then
+                LogWarning "Get_Order() could not find object: ${response_json}"
+                exit 3
+            else
+                if [ -z "${error_code}" ]
+                then
+                    # LogWarning "Get_Order() could not find orders: ${response_json}"
+                    exit
+                else
+                    LogError "Get_Order() failed: ${response_json}"
+                    exit 4
+                fi
+            fi
+        else
+           Log "{ \"orders\": $(echo "${response_json}" | jq -r '.orders // empty') }" 
+        fi
+    else
+        LogError "Get_Order() failed: ${response_json}"
+        exit 4
+    fi
+}
+
 Add_Order()
 {
     LogVerbose ".. Add_Order()"
@@ -345,9 +477,9 @@ Add_Order()
     then
         request_body="${request_body}, \"arguments\": {"
         comma=
-        set -- "$(echo "${variable}" | sed -r 's/[,]+/ /g')"
+        set -- "$(echo "${variable}" | tr ' ' '\a' | sed -r 's/[,]+/ /g')"
         for i in $@; do
-            request_body="${request_body}${comma} \"${i%-*}\": \"${i#*-}\""
+            request_body="${request_body}${comma} \"${i%=*}\": \"$(echo ${i#*=} | tr '\a' ' ')\""
             comma=,
         done
         request_body="${request_body} }"
@@ -678,9 +810,9 @@ Resume_Order()
     then
         request_body="${request_body}, \"arguments\": {"
         comma=
-        set -- "$(echo "${variable}" | sed -r 's/[,]+/ /g')"
+        set -- "$(echo "${variable}" | tr ' ' '\a' | sed -r 's/[,]+/ /g')"
         for i in $@; do
-            request_body="${request_body}${comma} \"${i%-*}\": \"${i#*-}\""
+            request_body="${request_body}${comma} \"${i%=*}\": \"$(echo ${i#*=} | tr '\a' ' ')\""
             comma=,
         done
         request_body="${request_body} }"
@@ -1545,13 +1677,13 @@ Delete_Notices()
     while ifs=$'\t' read -r path; do
         if [ -n "${date_to}" ]
         then
-            notices=($(echo "${response_json}" | jq --arg path "${path}" --arg date "${date_to}" -r '.noticeBoards[] | select(.path == $path) | [.notices[].id | select(.|startswith($date)) | tojson] | join(" ")'))
+            notices=($(echo "${response_json}" | jq --arg path "${path}" --arg date "${date_to}" -r '.noticeBoards[] | select(.path == $path) | [.notices[] | select(.state._text == "POSTED") | .id | select(.|startswith($date)) | tojson] | join(" ")'))
         else
             if [ -n "${notice_id}" ]
             then
-                notices=($(echo "${response_json}" | jq --arg path "${path}" --arg noticeId "${notice_id}" -r '.noticeBoards[] | select(.path == $path) | [.notices[].id | select(. == $noticeId) | tojson] | join(" ")'))
+                notices=($(echo "${response_json}" | jq --arg path "${path}" --arg noticeId "${notice_id}" -r '.noticeBoards[] | select(.path == $path) | [.notices[] | select(.state._text == "POSTED") | .id | select(. == $noticeId) | tojson] | join(" ")'))
             else
-                notices=($(echo "${response_json}" | jq --arg path "${path}" -r '.noticeBoards[] | select(.path == $path) | [.notices[].id | tojson] | join(" ")'))
+                notices=($(echo "${response_json}" | jq --arg path "${path}" -r '.noticeBoards[] | select(.path == $path) | [.notices[] | select(.state._text == "POSTED") | .id | tojson] | join(" ")'))
             fi
         fi
 
@@ -1734,6 +1866,7 @@ Usage()
     >&"$1" echo ""
     >&"$1" echo "  Commands:"
     >&"$1" echo "    add-order         --workflow  [--date-to] [--order-name] [--block-position] [--start-position] [--end-position] [--variable] [--force]"
+    >&"$1" echo "    get-order         --workflow  [--folder] [--recursive] [--order-id] [--state] [--date-from] [--date-to] [--scheduled-date-to] [--time-zone] [--regex] [--limit] [--compact]"
     >&"$1" echo "    cancel-order     [--workflow] [--folder] [--recursive] [--order-id] [--state] [--date-from] [--date-to] [--time-zone] [--force] [--deep]"
     >&"$1" echo "    suspend-order    [--workflow] [--folder] [--recursive] [--order-id] [--state] [--date-from] [--date-to] [--time-zone] [--force] [--deep] [--reset]"
     >&"$1" echo "    resume-order     [--workflow] [--folder] [--recursive] [--order-id] [--state] [--label] [--variable]"
@@ -1766,8 +1899,9 @@ Usage()
     >&"$1" echo "    --start-position=<label>           | optional: label from which the order will be started"
     >&"$1" echo "    --end-position=<label[,label]>     | optional: list of labels before which the order will terminate"
     >&"$1" echo "    --variable=<key=value[,key=value]> | optional: list of variables holding key/value pairs"
-    >&"$1" echo "    --date-from=<date>                 | optional: order past scheduled date"
-    >&"$1" echo "    --date-to=<date>                   | optional: order scheduled date or notice date, default: now"
+    >&"$1" echo "    --date-from=<date>                 | optional: order past status date"
+    >&"$1" echo "    --date-to=<date>                   | optional: order status date or notice date, default: now"
+    >&"$1" echo "    --scheduled-date-to=<date>         | optional: order scheduled date, default: now"
     >&"$1" echo "    --time-zone=<tz>                   | optional: time zone for dates, default: ${time_zone}"
     >&"$1" echo "                                                   see https://en.wikipedia.org/wiki/List_of_tz_database_time_zones"
     >&"$1" echo "    --state=<state[,state]>            | optional: list of states limiting orders to be processed such as"
@@ -1775,6 +1909,8 @@ Usage()
     >&"$1" echo "    --folder=<path[,path]>             | optional: list of folders holding workflows, orders, notice boards"
     >&"$1" echo "    --workflow=<name[,name]>           | optional: list of workflow names"
     >&"$1" echo "    --order-id=<id[,id]>               | optional: list of order identifiers"
+    >&"$1" echo "    --regex=<regular-expression>       | optional: filters orders by matching order names"
+    >&"$1" echo "    --limit=<number>                   | optional: limits the number of orders returned, default: ${limit}"
     >&"$1" echo "    --label=<label[,label]>            | optional: list of labels for jobs"
     >&"$1" echo "    --notice-board=<name[,name]>       | optional: list of notice boards"
     >&"$1" echo "    --notice-id=<id>                   | optional: notice identifier, default: ${notice_id}"
@@ -1798,6 +1934,7 @@ Usage()
     >&"$1" echo "    -p | --password                    | asks for password"
     >&"$1" echo "    -k | --key-password                | asks for key password"
     >&"$1" echo "    -r | --recursive                   | specifies folders to be looked up recursively"
+    >&"$1" echo "    -c | --compact                     | specifies a compact result to be returned"
     >&"$1" echo "    -d | --deep                        | specifies child orders to be subject to cancel/suspend operation"
     >&"$1" echo "    -s | --reset                       | resets instruction for suspend operation"
     >&"$1" echo "    -f | --force                       | specifies forced start or termination of jobs"
@@ -1821,7 +1958,7 @@ Arguments()
     Get_Timezone
 
     case "$1" in
-        add-order|cancel-order|suspend-order|resume-order|confirm-order|letrun-order|conf-order|transfer-order|stop-job|unstop-job|skip-job|unskip-job|suspend-workflow|resume-workflow|post-notice|get-notice|delete-notice|encrypt|decrypt) action=$1
+        add-order|get-order|cancel-order|suspend-order|resume-order|confirm-order|letrun-order|conf-order|transfer-order|stop-job|unstop-job|skip-job|unskip-job|suspend-workflow|resume-workflow|post-notice|get-notice|delete-notice|encrypt|decrypt) action=$1
                                     ;;
         -h|--help)                  Usage 1
                                     exit
@@ -1855,6 +1992,10 @@ Arguments()
                                     ;;
             --order-name=*)         order_name=$(echo "${option}" | sed 's/--order-name=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
                                     ;;
+            --regex=*)              regex=$(echo "${option}" | sed 's/--regex=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --limit=*)              limit=$(echo "${option}" | sed 's/--limit=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
             --block-position=*)     block_position=$(echo "${option}" | sed 's/--block-position=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
                                     ;;
             --start-position=*)     start_position=$(echo "${option}" | sed 's/--start-position=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
@@ -1866,6 +2007,8 @@ Arguments()
             --date-from=*)          date_from=$(echo "${option}" | sed 's/--date-from=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
                                     ;;
             --date-to=*)            date_to=$(echo "${option}" | sed 's/--date-to=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
+                                    ;;
+            --scheduled-date-to=*)  scheduled_date_to=$(echo "${option}" | sed 's/--scheduled-date-to=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
                                     ;;
             --time-zone=*)          time_zone=$(echo "${option}" | sed 's/--time-zone=//' | sed 's/^"//' | sed 's/"$//' | sed 's/^\(.*\)\/$/\1/')
                                     ;;
@@ -1919,6 +2062,8 @@ Arguments()
                                     ;;
             -r|--recursive)         recursive=true
                                     ;;
+            -c|--compact)           compact=true
+                                    ;;
             -s|--reset)             reset=true
                                     ;;
             -f|--force)             force=true
@@ -1929,7 +2074,7 @@ Arguments()
                                     ;;
             --show-logs)            show_logs=1
                                     ;;
-            add-order|cancel-order|suspend-order|resume-order|confirm-order|letrun-order|transfer-order|stop-job|unstop-job|skip-job|unskip-job|suspend-workflow|resume-workflow|post-notice|get-notice|delete-notice|encrypt|decrypt)
+            add-order|get-order|cancel-order|suspend-order|resume-order|confirm-order|letrun-order|transfer-order|stop-job|unstop-job|skip-job|unskip-job|suspend-workflow|resume-workflow|post-notice|get-notice|delete-notice|encrypt|decrypt)
                                     ;;
             *)                      Usage 2
                                     >&2 echo "unknown option: ${option}"
@@ -1961,10 +2106,10 @@ Arguments()
             exit 1
         fi
     
-        if [ -z "${joc_user}" ]
+        if [ -z "${joc_user}" ] && [ -z "${joc_client_key}" ]
         then
             Usage 2
-            LogError "JOC Cockpit user account not specified: --user=<account>"
+            LogError "No JOC Cockpit client authentication certificate and no user account specified: --user=<account>"
             exit 1
         fi
     
@@ -2220,6 +2365,8 @@ Process()
     case "${action}" in
         add-order)          Add_Order
                             ;;
+        get-order)          Get_Order
+                            ;;
         cancel-order)       Cancel_Order
                             ;;
         suspend-order)      Suspend_Order
@@ -2323,6 +2470,7 @@ End()
     unset variable
     unset date_from
     unset date_to
+    unset scheduled_date_to
     unset time_zone
     unset full_info
     unset zone_info
@@ -2334,6 +2482,9 @@ End()
     unset force
     unset reset
     unset deep
+    unset compact
+    unset regex
+    unset limit
 
     unset cert_file
     unset key_file
